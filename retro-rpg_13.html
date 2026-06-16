@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EMBERLANDS — A Retro Quest</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  :root{--void:#0d0b14;--gold:#e9c46a;--blood:#bc4749;--bone:#e8e1cf;--shadow:#181520;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;background:#000;overflow:hidden;font-family:'Press Start 2P',monospace;color:var(--bone);}
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;
+    background:radial-gradient(circle at 50% 40%,#1a1726 0%,#08070d 100%);}
+  #frame{position:relative;image-rendering:pixelated;transform-origin:center center;
+    box-shadow:0 0 0 4px #2a2438,0 0 0 8px #12101c,0 24px 60px rgba(0,0,0,.7);}
+  canvas{display:block;image-rendering:pixelated;cursor:crosshair;}
+  #scan{position:absolute;inset:0;pointer-events:none;z-index:5;
+    background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0,rgba(0,0,0,0) 2px,rgba(0,0,0,.14) 3px,rgba(0,0,0,0) 4px);
+    mix-blend-mode:multiply;}
+  #vig{position:absolute;inset:0;pointer-events:none;z-index:6;
+    background:radial-gradient(ellipse at center,rgba(0,0,0,0) 58%,rgba(0,0,0,.5) 100%);}
+  .screen{position:absolute;inset:0;z-index:10;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;text-align:center;background:rgba(8,7,13,.93);gap:20px;padding:24px;}
+  .screen.hidden{display:none;}
+  .screen h1{font-size:26px;line-height:1.5;color:var(--gold);text-shadow:3px 3px 0 var(--blood);letter-spacing:1px;}
+  .screen h2{font-size:16px;color:var(--blood);text-shadow:2px 2px 0 #000;}
+  .screen p{font-size:9px;line-height:2.1;color:#9b94a8;max-width:440px;}
+  .screen .keys{font-size:9px;line-height:2.5;color:var(--bone);}
+  .blink{animation:blink 1s steps(2) infinite;}
+  @keyframes blink{50%{opacity:0;}}
+  kbd{background:#2a2438;border:2px solid #4a4262;border-bottom-width:4px;border-radius:3px;
+    padding:3px 7px;color:var(--bone);font-size:9px;display:inline-block;margin:0 2px;}
+  #toast{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:9;
+    background:rgba(13,11,20,.9);border:2px solid var(--gold);color:var(--gold);font-size:9px;
+    padding:9px 14px;white-space:nowrap;opacity:0;transition:opacity .25s;pointer-events:none;}
+  #toast.show{opacity:1;}
+  @media (max-width:560px){.screen h1{font-size:18px;}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="frame">
+    <canvas id="game" width="480" height="320"></canvas>
+    <div id="scan"></div>
+    <div id="vig"></div>
+    <div id="toast"></div>
+
+    <div id="title" class="screen">
+      <h1>EMBERLANDS</h1>
+      <p>A vast cursed realm of grass, snow, desert and a smouldering volcano. Visit the market at the heart of the world to trade, then hunt the four mighty Wardens and the rare biome relics.</p>
+      <div class="keys">
+        <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp;·&nbsp; <kbd>SHIFT</kbd> sprint &nbsp;·&nbsp; <kbd>CLICK</kbd>/<kbd>J</kbd> attack/shoot<br>
+        <kbd>E</kbd> chest / shop &nbsp;·&nbsp; <kbd>I</kbd> bag &nbsp;·&nbsp; <kbd>Q</kbd> quests &nbsp;·&nbsp; <kbd>O</kbd> world map
+      </div>
+      <p class="blink">press &nbsp;ENTER&nbsp; to begin</p>
+    </div>
+
+    <div id="death" class="screen hidden">
+      <h2>YOU HAVE FALLEN</h2>
+      <p id="deathline">The shadow reclaims the land.</p>
+      <p class="blink">press &nbsp;ENTER&nbsp; to rise again</p>
+    </div>
+
+    <div id="win" class="screen hidden">
+      <h1 style="color:var(--bone)">THE CURSE<br>IS BROKEN</h1>
+      <p id="winline">All four Wardens are freed. Dawn returns to the Emberlands.</p>
+      <p class="blink">press &nbsp;ENTER&nbsp; to play again</p>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+//  EMBERLANDS v5
+//  + central market (buy potions/boost, sell items)
+//  + boost potion = 30s infinite sprint
+//  + click marker again to remove it
+//  + NO enemy/boss may enter water
+//  + cactus deals 2 dps on contact
+//  + richer pixel graphics
+// ============================================================
+const cv=document.getElementById('game'), ctx=cv.getContext('2d');
+ctx.imageSmoothingEnabled=false;
+const VIEW_W=cv.width, VIEW_H=cv.height;
+const TILE=24;
+const MAP_W=285, MAP_H=222;
+const METERS_PER_TILE=2;
+
+const C={
+  void:'#0d0b14',grass:'#3f6047',grass2:'#365340',grassLite:'#56885c',grassDk:'#2a4632',
+  sand:'#cdb27e',sandDk:'#ad9162',sandLite:'#e0c994',
+  water:'#2f73a0',waterDk:'#1d4f6b',waterLite:'#4f9cc9',waterFoam:'#bfe3f2',
+  stone:'#6f6f76',stoneDk:'#4a4a52',stoneLite:'#9092a0',
+  tree:'#244a2c',treeTop:'#3f7048',treeShade:'#16301c',
+  path:'#a58a64',pathDk:'#86704f',gold:'#e9c46a',blood:'#bc4749',bone:'#e8e1cf',
+  shadow:'#181520',wood:'#7a5230',woodDk:'#573a20',steel:'#c8ccd4',stam:'#5ec27d',boost:'#ffd23d',
+  snow:'#e2ebf2',snowDk:'#bcc9d6',snowLite:'#ffffff',ice:'#a4d4e2',iceDk:'#7bb4c8',
+  pine:'#1f3a2e',pineTop:'#2f5340',pineLite:'#3f6b52',
+  lava:'#ec5a22',lavaDk:'#a8300c',lavaLite:'#ffb13d',lavaGlow:'#fff4c2',
+  ash:'#3d372f',ashDk:'#27221e',ashLite:'#544c42',
+  rock:'#5f4438',rockDk:'#3d2a22',dune:'#dcbb7e',duneDk:'#bf9a5e',
+  cactus:'#3e8b46',cactusDk:'#2a6432',cactusLite:'#56a85e',
+  frost:'#7fd4e0',ember:'#ff7a3d',venom:'#7fd44e',arrow:'#caa15a',
+  wallA:'#7a5536',wallB:'#5e3f24',roof:'#9c4040',roofDk:'#6e2c2c',sign:'#e9c46a'
+};
+
+// ============================================================
+//  AUDIO
+// ============================================================
+const Audio2={
+  ctx:null,master:null,musicGain:null,musicTimer:null,on:true,step:0,
+  init(){if(this.ctx)return;const AC=window.AudioContext||window.webkitAudioContext;this.ctx=new AC();
+    this.master=this.ctx.createGain();this.master.gain.value=0.5;this.master.connect(this.ctx.destination);
+    this.musicGain=this.ctx.createGain();this.musicGain.connect(this.master);this.musicGain.gain.value=0.22;},
+  beep(freq,dur=0.08,type='square',gain=0.3,dest=null){if(!this.ctx||!this.on)return;
+    const o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type=type;o.frequency.value=freq;
+    g.gain.setValueAtTime(gain,this.ctx.currentTime);g.gain.exponentialRampToValueAtTime(0.001,this.ctx.currentTime+dur);
+    o.connect(g);g.connect(dest||this.master);o.start();o.stop(this.ctx.currentTime+dur);},
+  swing(){this.beep(420,0.07,'square',0.18);this.beep(300,0.09,'sawtooth',0.12);},
+  shoot(){this.beep(880,0.05,'square',0.12);this.beep(560,0.08,'sine',0.1);},
+  hit(){this.beep(180,0.1,'square',0.25);this.beep(90,0.12,'triangle',0.2);},
+  hurt(){this.beep(140,0.18,'sawtooth',0.3);this.beep(70,0.2,'square',0.25);},
+  burn(){this.beep(110,0.14,'sawtooth',0.22);},
+  prick(){this.beep(240,0.05,'square',0.12);},
+  splash(){this.beep(330,0.12,'sine',0.12);this.beep(180,0.16,'sine',0.1);},
+  chest(){[523,659,784,1047].forEach((f,i)=>setTimeout(()=>this.beep(f,0.12,'square',0.22),i*70));},
+  pickup(){this.beep(700,0.06,'square',0.2);setTimeout(()=>this.beep(950,0.09,'square',0.2),60);},
+  coin(){this.beep(988,0.05,'square',0.2);setTimeout(()=>this.beep(1319,0.08,'square',0.2),55);},
+  sell(){this.beep(660,0.05,'square',0.18);setTimeout(()=>this.beep(523,0.09,'square',0.16),55);},
+  buyfail(){this.beep(160,0.12,'sawtooth',0.2);},
+  rare(){[660,880,1100,1320,1760,2093].forEach((f,i)=>setTimeout(()=>this.beep(f,0.15,'square',0.25),i*80));},
+  boost(){[523,784,1047,1568].forEach((f,i)=>setTimeout(()=>this.beep(f,0.14,'square',0.22),i*70));},
+  bossDown(){[392,330,262,196,131].forEach((f,i)=>setTimeout(()=>this.beep(f,0.26,'sawtooth',0.32),i*140));},
+  win(){[523,659,784,1047,1319].forEach((f,i)=>setTimeout(()=>this.beep(f,0.3,'square',0.3),i*160));},
+  ui(){this.beep(600,0.04,'square',0.15);},
+  melody:[330,392,440,392,330,294,330,392,262,330,392,330,262,247,262,330],
+  bass:[110,110,98,98,87,87,98,98],
+  startMusic(){if(this.musicTimer||!this.ctx)return;this.step=0;
+    this.musicTimer=setInterval(()=>{if(!this.on)return;
+      const m=this.melody[this.step%this.melody.length];this.beep(m,0.16,'square',0.10,this.musicGain);
+      if(this.step%2===0){const b=this.bass[(Math.floor(this.step/2))%this.bass.length];this.beep(b,0.22,'triangle',0.14,this.musicGain);}
+      if(this.step%4===0)this.beep(1568,0.03,'square',0.04,this.musicGain);this.step++;},200);},
+  toggle(){this.on=!this.on;return this.on;}
+};
+
+// ============================================================
+//  WORLD GEN
+//  0 grass,1 tree,2 water,3 beach,4 mountain,5 path,6 flowers,
+//  7 snow,8 pine,9 ice,10 desert,11 cactus,12 lava,13 volrock,14 ash,15 peak,
+//  16 shop floor (walkable plaza)
+// ============================================================
+let map=[], biomeMap=[];
+function rng(seed){let s=seed>>>0;return()=>{s=(s*1664525+1013904223)>>>0;return s/4294967296;};}
+function makeNoise(seed,scale){
+  const r=rng(seed);const gw=Math.ceil(MAP_W/scale)+2,gh=Math.ceil(MAP_H/scale)+2;
+  const grid=[];for(let y=0;y<gh;y++){const row=[];for(let x=0;x<gw;x++)row.push(r());grid.push(row);}
+  return(x,y)=>{const gx=x/scale,gy=y/scale,x0=Math.floor(gx),y0=Math.floor(gy);
+    const fx=gx-x0,fy=gy-y0,sx=fx*fx*(3-2*fx),sy=fy*fy*(3-2*fy);
+    const a=grid[y0][x0],b=grid[y0][x0+1],c=grid[y0+1][x0],d=grid[y0+1][x0+1];
+    return(a*(1-sx)+b*sx)*(1-sy)+(c*(1-sx)+d*sx)*sy;};
+}
+const VOLCANO={x:Math.floor(MAP_W*0.72),y:Math.floor(MAP_H*0.30),r:30};
+const SHOP={x:Math.floor(MAP_W/2),y:Math.floor(MAP_H/2)}; // shop building tile (door)
+// merging station (forge) sits on the plaza to the right of the shop.
+const FORGE={x:Math.floor(MAP_W/2)+3,y:Math.floor(MAP_H/2)-1}; // anvil tile (interact from below)
+
+function biomeAt(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return'grass';return biomeMap[ty][tx];}
+
+function genWorld(){
+  const elev=makeNoise(1337,18),moist=makeNoise(7777,22),temp=makeNoise(4242,40),detail=rng(909);
+  map=[];biomeMap=[];
+  for(let y=0;y<MAP_H;y++){
+    const mrow=[],brow=[];
+    for(let x=0;x<MAP_W;x++){
+      if(x<2||y<2||x>MAP_W-3||y>MAP_H-3){mrow.push(4);brow.push('edge');continue;}
+      const vd=Math.hypot(x-VOLCANO.x,y-VOLCANO.y);
+      if(vd<VOLCANO.r){brow.push('volcano');
+        if(vd<5)mrow.push(15);else if(vd<9)mrow.push(12);
+        else if(vd<VOLCANO.r*0.6&&detail()<0.18)mrow.push(12);
+        else if(detail()<0.15)mrow.push(13);else mrow.push(14);continue;}
+      const e=elev(x,y),mo=moist(x,y);
+      let t=temp(x,y)*0.45+(y/MAP_H)*0.85-0.02;
+      if(e<0.30){mrow.push(2);brow.push('ocean');continue;}
+      if(e<0.36){mrow.push(3);brow.push('beach');continue;}
+      if(e>0.78){mrow.push(4);brow.push('mountain');continue;}
+      if(t<0.42){brow.push('snow');
+        if(e>0.72)mrow.push(4);else if(detail()<0.10)mrow.push(8);
+        else if(detail()<0.05)mrow.push(9);else mrow.push(7);}
+      else if(t>0.70&&mo<0.4){brow.push('desert');
+        if(detail()<0.05)mrow.push(11);else mrow.push(10);}
+      else{brow.push('grass');
+        if(mo>0.55&&detail()<0.20)mrow.push(1);else if(detail()<0.05)mrow.push(6);else mrow.push(0);}
+    }
+    map.push(mrow);biomeMap.push(brow);
+  }
+  const cy=Math.floor(MAP_H/2),cx=Math.floor(MAP_W/2);
+  for(let x=2;x<MAP_W-2;x++){if(map[cy][x]!==2&&map[cy][x]!==12){map[cy][x]=5;map[cy+1][x]=5;}}
+  for(let y=2;y<MAP_H-2;y++){if(map[y][cx]!==2&&map[y][cx]!==12){map[y][cx]=5;map[y][cx+1]=5;}}
+  // ---- Market plaza at the very centre ----
+  for(let y=-4;y<=4;y++)for(let x=-4;x<=4;x++){map[cy+y][cx+x]=16;biomeMap[cy+y][cx+x]='plaza';}
+  // shop building occupies a 5-wide footprint just above the door tile;
+  // we mark those as solid via the shopBuilding rect (drawn specially)
+}
+// shop solid footprint (building body), door at SHOP tile
+const SHOP_RECT={x0:SHOP.x-2,y0:SHOP.y-3,x1:SHOP.x+2,y1:SHOP.y-1}; // inclusive tile rect (walls)
+function inShopBuilding(tx,ty){return tx>=SHOP_RECT.x0&&tx<=SHOP_RECT.x1&&ty>=SHOP_RECT.y0&&ty<=SHOP_RECT.y1;}
+
+function solid(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return true;
+  if(inShopBuilding(tx,ty))return true;
+  if(tx===FORGE.x&&ty===FORGE.y)return true; // forge anvil is solid
+  const t=map[ty][tx];return t===1||t===4||t===8||t===11||t===13||t===15;}
+function isWater(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return false;const t=map[ty][tx];return t===2||t===9;}
+function isLava(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return false;return map[ty][tx]===12;}
+function isCactus(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return false;return map[ty][tx]===11;}
+// enemies may never enter water OR lava OR solid
+function enemyBlocked(tx,ty){return solid(tx,ty)||isWater(tx,ty)||isLava(tx,ty);}
+
+// ============================================================
+//  ITEMS
+// ============================================================
+const WEAPONS={
+  fists:{name:'Bare Fists',dmg:6,range:30,swing:14,color:C.bone,icon:'fist'},
+  dagger:{name:'Iron Dagger',dmg:11,range:30,swing:11,color:'#b9c0c9',icon:'dagger',value:8},
+  sword:{name:'Knight Sword',dmg:16,range:38,swing:16,color:C.steel,icon:'sword',value:15},
+  spear:{name:'Tide Spear',dmg:20,range:56,swing:14,color:'#7fd4e0',icon:'spear',value:20},
+  axe:{name:'Warden Axe',dmg:26,range:40,swing:22,color:'#d98c4a',icon:'axe',value:28},
+  blade:{name:'Ember Blade',dmg:40,range:46,swing:18,color:'#ff7a3d',icon:'blade',value:45},
+  bow:{name:'Hunter Bow',dmg:18,range:0,swing:12,color:'#a9772f',icon:'bow',ranged:true,arrowSpd:6,value:18},
+  warbow:{name:'Warden Longbow',dmg:34,range:0,swing:10,color:'#d9b25a',icon:'bow',ranged:true,arrowSpd:7.5,value:40},
+  firesword:{name:'Fire Sword',dmg:50,range:44,swing:18,color:'#ff5a1f',icon:'blade',burn:true,relic:'volcano',value:90},
+  frostfang:{name:'Frostfang Blade',dmg:46,range:44,swing:16,color:'#7fd4e0',icon:'blade',freeze:true,relic:'snow',value:85},
+  sunspear:{name:'Sunspear',dmg:44,range:62,swing:14,color:'#ffd23d',icon:'spear',relic:'desert',value:80},
+  tideglaive:{name:'Tide Glaive',dmg:42,range:58,swing:15,color:'#3d8bbf',icon:'spear',relic:'ocean',value:78},
+  thornaxe:{name:'Thornwood Axe',dmg:48,range:42,swing:22,color:'#3e8b46',icon:'axe',relic:'grass',value:82},
+  // ---- the four WARDEN SWORDS (one dropped by each Warden) ----
+  // each carries a unique elemental effect; collect all four to forge Excalibur.
+  emberblade:{name:'Ember Warden Sword',dmg:52,range:46,swing:18,color:'#ff5a1f',icon:'blade',burn:true,warden:true,value:95},
+  frostblade:{name:'Frost Warden Sword',dmg:48,range:46,swing:17,color:'#7fd4e0',icon:'blade',slow:true,warden:true,value:92},
+  tideblade:{name:'Tide Warden Sword',dmg:50,range:48,swing:16,color:'#3d8bbf',icon:'blade',shock:true,warden:true,value:93},
+  wildblade:{name:'Wild Warden Sword',dmg:54,range:46,swing:19,color:'#3e8b46',icon:'blade',venom:true,warden:true,value:96},
+  // ---- forged from all four Warden swords at the merging station ----
+  excalibur:{name:'Excalibur',dmg:100,range:52,swing:16,color:'#fff1a8',icon:'blade',burn:true,slow:true,shock:true,venom:true,legendary:true,value:300}
+};
+// the four swords required to forge Excalibur
+const EXCALIBUR_PARTS=['emberblade','frostblade','tideblade','wildblade'];
+const ARMORS={
+  leather:{name:'Leather Vest',val:30,color:'#8a5a30',value:12},
+  iron:{name:'Iron Mail',val:55,color:'#9aa0aa',value:24},
+  warden:{name:'Warden Plate',val:90,color:'#d9b25a',value:50},
+  emberplate:{name:'Ember Plate',val:120,color:'#ff7a3d',relic:'volcano',value:95},
+  frostmail:{name:'Frostguard Mail',val:115,color:'#7fd4e0',relic:'snow',value:90},
+  duneveil:{name:'Dune Veil',val:105,color:'#ffd23d',relic:'desert',value:85},
+  titanplate:{name:'Titan Plate',val:160,color:'#e9d9a0',relic:'boss',value:120}
+};
+const BIOME_LOOT={
+  volcano:{relicW:'firesword',relicA:'emberplate',commonW:'sword',commonA:'iron',tint:C.ember},
+  snow:   {relicW:'frostfang',relicA:'frostmail',commonW:'sword',commonA:'iron',tint:C.frost},
+  desert: {relicW:'sunspear', relicA:'duneveil', commonW:'dagger',commonA:'leather',tint:'#ffd23d'},
+  ocean:  {relicW:'tideglaive',relicA:'iron',    commonW:'spear', commonA:'leather',tint:C.waterLite},
+  beach:  {relicW:'tideglaive',relicA:'leather', commonW:'dagger',commonA:'leather',tint:C.sand},
+  grass:  {relicW:'thornaxe', relicA:'leather',  commonW:'sword', commonA:'leather',tint:C.grassLite},
+  mountain:{relicW:'warbow',  relicA:'warden',   commonW:'axe',   commonA:'iron',tint:C.steel}
+};
+function biomeKeyFor(b){return BIOME_LOOT[b]?b:'grass';}
+
+// ============================================================
+//  PLAYER + PROJECTILES
+// ============================================================
+const INV_SLOTS=24;
+const player={
+  x:MAP_W*TILE/2,y:MAP_H*TILE/2+TILE*2,w:16,h:18, // spawn just south of the shop door
+  baseSpeed:1.9,dir:'down',moving:false,frame:0,ftick:0,
+  hp:100,maxhp:100,armor:0,maxarmor:0,
+  weaponKey:'fists',equippedArmor:null,
+  stam:100,maxstam:100,sprinting:false,swimming:false,
+  inv:(()=>{const a=new Array(INV_SLOTS).fill(null);a[0]={kind:'weapon',key:'fists'};return a;})(),
+  attacking:0,attackCD:0,hurt:0,gold:80,trail:[],lavaTick:0,cactusTick:0,attackAng:0,
+  boostTime:0, // ms of infinite-sprint remaining
+  arrows:0 // bow ammo
+};
+let arrows=[];
+function giveArrows(n){player.arrows+=n;}
+// inventory is a FIXED-LENGTH array of 24 slots (null = empty) so items
+// fill across all 3 rows of the grid, not just the first.
+function makeInv(){const a=new Array(INV_SLOTS).fill(null);a[0]={kind:'weapon',key:'fists'};return a;}
+// Returns 'ok' on success, 'full' if no free slot.
+// Stackables (potion, gold, boost, arrows) merge into an existing stack.
+// Everything else (weapons, armor) ALWAYS takes a fresh slot — duplicates allowed.
+function invAdd(kind,key,count=1){
+  const STACK=(kind==='potion'||kind==='gold'||kind==='boost'||kind==='arrows');
+  if(STACK){const s=player.inv.find(s=>s&&s.kind===kind&&s.key===key);if(s){s.count=(s.count||1)+count;return 'ok';}}
+  const empty=player.inv.findIndex(s=>!s);
+  if(empty<0)return 'full';
+  const item={kind,key};
+  if(count>1||STACK)item.count=count;
+  player.inv[empty]=item;return 'ok';
+}
+
+// ============================================================
+//  BOSSES
+// ============================================================
+const bosses=[
+  {name:'Warden of Stone',x:Math.floor(MAP_W*0.12),y:Math.floor(MAP_H*0.14),color:C.stone,accent:C.steel,
+    dropW:'tideblade',dropA:'titanplate',size:30,speed:1.05,reach:40},
+  {name:'Warden of Tide',x:Math.floor(MAP_W*0.88),y:Math.floor(MAP_H*0.16),color:C.water,accent:'#7fd4e0',
+    dropW:'frostblade',dropA:'frostmail',size:32,speed:1.2,reach:44},
+  {name:'Warden of Wild',x:Math.floor(MAP_W*0.12),y:Math.floor(MAP_H*0.86),color:C.tree,accent:C.grassLite,
+    dropW:'wildblade',dropA:'duneveil',size:34,speed:1.15,reach:42},
+  {name:'Warden of Ember',x:VOLCANO.x,y:VOLCANO.y+VOLCANO.r+5,color:'#7a2d1a',accent:'#ff7a3d',
+    dropW:'emberblade',dropA:'emberplate',size:38,speed:1.3,reach:46}
+];
+bosses.forEach(b=>{b.hp=2500;b.max=2500;b.dmg=30;b.alive=true;b.hit=0;b.atk=0;b.px=b.x*TILE;b.py=b.y*TILE;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;});
+// After the world is generated, make sure no Warden is sitting on water/lava/solid.
+// Spiral outward from its intended tile to the nearest tile a boss can actually stand on.
+function relocateBosses(){
+  bosses.forEach(b=>{
+    let bx=b.x,by=b.y;
+    if(!enemyBlocked(bx,by)){b.x=bx;b.y=by;b.px=bx*TILE;b.py=by*TILE;return;}
+    let found=false;
+    for(let r=1;r<60&&!found;r++){
+      for(let dy=-r;dy<=r&&!found;dy++)for(let dx=-r;dx<=r&&!found;dx++){
+        if(Math.abs(dx)!==r&&Math.abs(dy)!==r)continue; // ring only
+        const tx=bx+dx,ty=by+dy;
+        if(tx<2||ty<2||tx>=MAP_W-2||ty>=MAP_H-2)continue;
+        if(!enemyBlocked(tx,ty)){b.x=tx;b.y=ty;b.px=tx*TILE;b.py=ty*TILE;found=true;}
+      }
+    }
+  });
+}
+
+// ============================================================
+//  CHESTS
+// ============================================================
+let chests=[];
+function placeChestSafe(tx,ty){tx=Math.round(tx);ty=Math.round(ty);
+  let tries=0;while((solid(tx,ty)||isLava(tx,ty))&&tries<40){tx+=1;if(tx>=MAP_W-2){tx=2;ty+=1;}tries++;}
+  if(map[ty][tx]===2)map[ty][tx]=3;return{tx,ty};}
+function genChests(){
+  const r=rng(2024);chests=[];const cx=MAP_W/2,cy=MAP_H/2;
+  // starter chests near plaza
+  [{x:cx+7,y:cy+5,loot:{kind:'weapon',key:'dagger'}},
+   {x:cx-7,y:cy+5,loot:{kind:'weapon',key:'bow'}},
+   {x:cx+7,y:cy-5,loot:{kind:'armor',key:'leather'}},
+  ].forEach(s=>{const p=placeChestSafe(s.x,s.y);chests.push({x:p.tx,y:p.ty,loot:s.loot,opened:false,biome:'grass'});});
+  const CELL=14;
+  for(let gy=4;gy<MAP_H-4;gy+=CELL)for(let gx=4;gx<MAP_W-4;gx+=CELL){
+    if(r()>0.62)continue;
+    let tx=Math.min(MAP_W-3,gx+Math.floor(r()*CELL)),ty=Math.min(MAP_H-3,gy+Math.floor(r()*CELL));
+    if(solid(tx,ty)||isLava(tx,ty))continue;
+    if(Math.hypot(tx-cx,ty-cy)<10)continue;
+    const b=biomeKeyFor(biomeAt(tx,ty));const p=placeChestSafe(tx,ty);
+    chests.push({x:p.tx,y:p.ty,loot:rollBiomeLoot(r,b),opened:false,biome:b});
+  }
+}
+function rollBiomeLoot(r,biome){
+  const L=BIOME_LOOT[biome]||BIOME_LOOT.grass;const roll=r();
+  if(roll<0.04)return{kind:'weapon',key:L.relicW,relic:true};
+  if(roll<0.07)return{kind:'armor',key:L.relicA,relic:true};
+  if(roll<0.22)return{kind:'weapon',key:L.commonW};
+  if(roll<0.37)return{kind:'armor',key:L.commonA};
+  if(roll<0.50)return{kind:'weapon',key:(r()<0.5?'bow':'sword')};
+  if(roll<0.74)return{kind:'potion',key:'heal',val:50};
+  return{kind:'gold',key:'gold',val:20+Math.floor(r()*60)};
+}
+
+// ============================================================
+//  MOBS
+// ============================================================
+let mobs=[];
+function genMobs(){
+  const r=rng(7);mobs=[];
+  for(let i=0;i<90;i++){
+    let tx,ty,tries=0;
+    do{tx=2+Math.floor(r()*(MAP_W-4));ty=2+Math.floor(r()*(MAP_H-4));tries++;}while(enemyBlocked(tx,ty)&&tries<25);
+    if(enemyBlocked(tx,ty))continue;
+    mobs.push({px:tx*TILE,py:ty*TILE,hp:30,max:30,dmg:8,speed:0.6+r()*0.5,hit:0,wob:r()*6,slowT:0,shockT:0,dotT:0});
+  }
+}
+
+// ============================================================
+//  SHOP
+// ============================================================
+const SHOP_BUY=[
+  {key:'heal',kind:'potion',name:'Health Potion',cost:25,val:50,desc:'Restores 50 HP'},
+  {key:'boost',kind:'boost',name:'Boost Potion',cost:50,desc:'30s infinite sprint'},
+  {key:'arrows',kind:'ammo',name:'100 Arrows',cost:100,desc:'Refill bow ammo'},
+  {key:'arrows_dummy',kind:'info',name:'Hunter Bow',cost:60,wkey:'bow',desc:'Comes with 100 arrows'},
+  {key:'iron',kind:'armor',name:'Iron Mail',cost:70,akey:'iron',desc:'+55 armor'}
+];
+let shopOpen=false, shopTab='buy', shopSel=0;
+let forgeOpen=false;
+function sellValue(it){
+  if(!it)return 0;
+  if(it.kind==='weapon'){if(it.key==='fists')return 0;return WEAPONS[it.key].value||10;}
+  if(it.kind==='armor')return ARMORS[it.key].value||10;
+  if(it.kind==='potion')return 10;
+  if(it.kind==='gold')return 0;
+  return 0;
+}
+
+// ============================================================
+//  QUESTS
+// ============================================================
+let quests=[], wispKills=0; const questClaimed={};
+function genQuests(){
+  quests=[
+    {id:'wardens',title:'Free the Four Wardens',desc:'Defeat each mighty Warden (2500 HP).',done:()=>bosses.filter(b=>!b.alive).length,goal:4,reward:'The curse breaks'},
+    {id:'relics',title:'Hunt the Relics',desc:'Find a legendary biome relic weapon.',done:()=>relicsFound,goal:1,reward:'Glory'},
+    {id:'explore',title:'Chart the Realm',desc:'Open chests across the biomes.',done:()=>chests.filter(c=>c.opened).length,goal:25,reward:'+10 max HP per chest'},
+    {id:'cleanse',title:'Cleanse the Shadow',desc:'Destroy roaming shadow wisps.',done:()=>wispKills,goal:40,reward:'+50 gold'}
+  ];
+}
+let relicsFound=0;
+function checkQuests(){quests.forEach(q=>{if(!questClaimed[q.id]&&q.done()>=q.goal){questClaimed[q.id]=true;Audio2.win();
+  toast('QUEST COMPLETE: '+q.title);if(q.id==='cleanse')player.gold+=50;}});}
+
+// ============================================================
+//  STATE / INPUT
+// ============================================================
+let GAME='title',invOpen=false,questOpen=false,mapOpen=false;
+let cam={x:0,y:0};const keys={};let toastT=0;let invSel=0;
+let marker=null;let mouse={x:0,y:0,down:false};
+
+function toast(msg){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');
+  clearTimeout(toastT);toastT=setTimeout(()=>el.classList.remove('show'),2600);}
+
+function anyPanel(){return invOpen||questOpen||mapOpen||shopOpen||forgeOpen;}
+
+addEventListener('keydown',e=>{
+  const k=e.key.toLowerCase();keys[k]=true;
+  if(k==='enter'){Audio2.init();if(GAME==='title')startGame();else if(GAME==='dead'||GAME==='win')resetGame();}
+  if(GAME!=='play')return;
+  if(shopOpen){handleShopKey(k);if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k))e.preventDefault();return;}
+  if(forgeOpen){if(k==='e'||k==='escape'){forgeOpen=false;Audio2.ui();}if(k==='enter')tryForgeExcalibur();if([' '].includes(k))e.preventDefault();return;}
+  if(k==='j'||k===' ')attackDir();
+  if(k==='e')interact();
+  if(k==='i'){invOpen=!invOpen;questOpen=false;mapOpen=false;Audio2.ui();}
+  if(k==='q'){questOpen=!questOpen;invOpen=false;mapOpen=false;Audio2.ui();}
+  if(k==='o'){mapOpen=!mapOpen;invOpen=false;questOpen=false;Audio2.ui();}
+  if(k==='r'&&marker){marker=null;toast('Marker cleared');}
+  if(k==='m'){const on=Audio2.toggle();toast('Audio '+(on?'ON':'OFF'));}
+  if(invOpen){
+    if(k==='arrowright'||k==='d')invSel=Math.min(INV_SLOTS-1,invSel+1),Audio2.ui();
+    if(k==='arrowleft'||k==='a')invSel=Math.max(0,invSel-1),Audio2.ui();
+    if(k==='arrowdown'||k==='s')invSel=Math.min(INV_SLOTS-1,invSel+8),Audio2.ui();
+    if(k==='arrowup'||k==='w')invSel=Math.max(0,invSel-8),Audio2.ui();
+    if(k==='enter'||k==='e')useSlot(invSel);
+  }
+  if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(k))e.preventDefault();
+});
+addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=false;});
+
+function canvasPos(e){const r=cv.getBoundingClientRect();
+  return{x:(e.clientX-r.left)*(VIEW_W/r.width),y:(e.clientY-r.top)*(VIEW_H/r.height)};}
+cv.addEventListener('mousemove',e=>{const p=canvasPos(e);mouse.x=p.x;mouse.y=p.y;});
+cv.addEventListener('mousedown',e=>{Audio2.init();if(GAME!=='play')return;
+  const p=canvasPos(e);mouse.x=p.x;mouse.y=p.y;mouse.down=true;
+  if(shopOpen){handleShopClick(p.x,p.y);return;}
+  if(forgeOpen){handleForgeClick(p.x,p.y);return;}
+  if(mapOpen){clickWorldMap(p.x,p.y);return;}
+  if(invOpen||questOpen)return;attackToward(p.x,p.y);});
+cv.addEventListener('mouseup',()=>mouse.down=false);
+cv.addEventListener('contextmenu',e=>e.preventDefault());
+
+function startGame(){document.getElementById('title').classList.add('hidden');GAME='play';Audio2.startMusic();}
+function resetGame(){
+  document.getElementById('death').classList.add('hidden');
+  document.getElementById('win').classList.add('hidden');
+  genWorld();genChests();genMobs();arrows=[];relocateBosses();
+  Object.assign(player,{x:MAP_W*TILE/2,y:MAP_H*TILE/2+TILE*2,hp:100,maxhp:100,armor:0,maxarmor:0,
+    weaponKey:'fists',equippedArmor:null,stam:100,maxstam:100,sprinting:false,swimming:false,
+    inv:makeInv(),attacking:0,attackCD:0,hurt:0,gold:80,dir:'down',trail:[],lavaTick:0,cactusTick:0,boostTime:0,boostMax:0,arrows:0});
+  for(const k in treeHP)delete treeHP[k];chips=[];
+  bosses.forEach(b=>{b.hp=b.max;b.alive=true;b.px=b.x*TILE;b.py=b.y*TILE;b.hit=0;b.atk=0;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b._dotAcc=0;});
+  wispKills=0;relicsFound=0;for(const k in questClaimed)delete questClaimed[k];marker=null;shopOpen=false;forgeOpen=false;genQuests();
+  GAME='play';Audio2.startMusic();
+}
+
+// ============================================================
+//  INVENTORY ACTIONS
+// ============================================================
+function useSlot(i){
+  const it=player.inv[i];if(!it)return;
+  if(it.kind==='weapon'){player.weaponKey=it.key;Audio2.pickup();toast('Equipped '+WEAPONS[it.key].name);}
+  else if(it.kind==='armor'){player.equippedArmor=it.key;player.maxarmor=ARMORS[it.key].val;player.armor=ARMORS[it.key].val;
+    Audio2.pickup();toast('Equipped '+ARMORS[it.key].name);}
+  else if(it.kind==='potion'){if(player.hp>=player.maxhp){toast('Already at full health');return;}
+    player.hp=Math.min(player.maxhp,player.hp+(it.val||50));it.count=(it.count||1)-1;if(it.count<=0)player.inv[i]=null;
+    Audio2.pickup();toast('Drank Health Potion (+'+(it.val||50)+')');}
+  else if(it.kind==='boost'){activateBoost();it.count=(it.count||1)-1;if(it.count<=0)player.inv[i]=null;}
+  else if(it.kind==='gold')toast('Gold: '+player.gold);
+}
+function activateBoost(){
+  player.boostTime+=30000; // each potion ADDS 30s to whatever is remaining
+  player.boostMax=Math.max(player.boostMax||0,player.boostTime); // for the HUD bar scale
+  Audio2.boost();
+  toast('BOOST! Sprint for '+Math.ceil(player.boostTime/1000)+'s');
+}
+
+// ============================================================
+//  SHOP LOGIC
+// ============================================================
+function buyItem(entry){
+  if(player.gold<entry.cost){Audio2.buyfail();toast('Not enough gold');return;}
+  // arrows: handled specially (refill ammo, not a slot item)
+  if(entry.kind==='ammo'){player.gold-=entry.cost;giveArrows(100);Audio2.coin();toast('Bought 100 arrows (-'+entry.cost+'g)');return;}
+  let res='ok';
+  if(entry.kind==='potion'){res=invAdd('potion','heal',1);player.inv.forEach(s=>{if(s&&s.kind==='potion')s.val=entry.val;});}
+  else if(entry.kind==='boost'){res=invAdd('boost','boost',1);}
+  else if(entry.kind==='armor'){res=invAdd('armor',entry.akey,1);}
+  else if(entry.kind==='info'){res=invAdd('weapon',entry.wkey,1);if(WEAPONS[entry.wkey].ranged)giveArrows(100);}
+  if(res==='full'){Audio2.buyfail();toast('Bag is full — sell something first');return;}
+  player.gold-=entry.cost;Audio2.coin();toast('Bought '+entry.name+' (-'+entry.cost+'g)');
+}
+function sellSlot(i){
+  const it=player.inv[i];if(!it){return;}
+  if(it.kind==='weapon'&&it.key===player.weaponKey){Audio2.buyfail();toast("Can't sell equipped weapon");return;}
+  if(it.kind==='armor'&&it.key===player.equippedArmor){Audio2.buyfail();toast("Can't sell equipped armor");return;}
+  if(it.kind==='weapon'&&it.key==='fists'){Audio2.buyfail();toast("Can't sell your fists");return;}
+  const v=sellValue(it);if(v<=0){Audio2.buyfail();toast('That has no resale value');return;}
+  // remove one
+  if(it.count&&it.count>1)it.count--;else player.inv[i]=null;
+  player.gold+=v;Audio2.sell();toast('Sold '+itemName(it)+' (+'+v+'g)');
+}
+function itemName(it){if(it.kind==='weapon')return WEAPONS[it.key].name;if(it.kind==='armor')return ARMORS[it.key].name;
+  if(it.kind==='potion')return 'Health Potion';if(it.kind==='boost')return 'Boost Potion';return 'item';}
+
+function handleShopKey(k){
+  if(k==='e'||k==='escape'){shopOpen=false;Audio2.ui();return;}
+  if(k==='tab'||k==='t'){shopTab=(shopTab==='buy')?'sell':'buy';shopSel=0;Audio2.ui();return;}
+  if(k==='arrowleft'||k==='a'){shopTab='buy';shopSel=0;Audio2.ui();return;}
+  if(k==='arrowright'||k==='d'){shopTab='sell';shopSel=0;Audio2.ui();return;}
+  const list=shopTab==='buy'?SHOP_BUY:player.inv;
+  if(k==='arrowup'||k==='w')shopSel=Math.max(0,shopSel-1),Audio2.ui();
+  if(k==='arrowdown'||k==='s')shopSel=Math.min(list.length-1,shopSel+1),Audio2.ui();
+  if(k==='enter'){if(shopTab==='buy')buyItem(SHOP_BUY[shopSel]);else sellSlot(shopSel);}
+}
+
+// ============================================================
+//  FORGE / MERGING STATION
+// ============================================================
+function hasPart(key){return player.inv.some(s=>s&&s.kind==='weapon'&&s.key===key);}
+function partsCollected(){return EXCALIBUR_PARTS.filter(hasPart).length;}
+function tryForgeExcalibur(){
+  if(hasPart('excalibur')||player.weaponKey==='excalibur'){Audio2.buyfail();toast('Excalibur is already forged');return;}
+  const have=partsCollected();
+  if(have<EXCALIBUR_PARTS.length){Audio2.buyfail();toast('Need all 4 Warden Swords ('+have+'/4) — defeat every Warden');return;}
+  // consume the four swords
+  EXCALIBUR_PARTS.forEach(key=>{const i=player.inv.findIndex(s=>s&&s.kind==='weapon'&&s.key===key);
+    if(i>=0){if(player.weaponKey===key)player.weaponKey='fists';player.inv[i]=null;}});
+  const res=invAdd('weapon','excalibur');
+  if(res==='full'){ // bag somehow full even after freeing 4 — force into first slot
+    const e=player.inv.findIndex(s=>!s);if(e>=0)player.inv[e]={kind:'weapon',key:'excalibur'};}
+  player.weaponKey='excalibur';
+  Audio2.rare();Audio2.win();
+  toast('★★ EXCALIBUR FORGED! 100 dmg with burn, slow, shock & venom ★★');
+}
+let forgeBtns=[];
+function handleForgeClick(mx,my){
+  for(let i=forgeBtns.length-1;i>=0;i--){const b=forgeBtns[i];
+    if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){
+      if(b.act==='forge')tryForgeExcalibur();
+      if(b.act==='close'){forgeOpen=false;Audio2.ui();}
+      return;}}
+}
+
+// ============================================================
+//  COMBAT
+// ============================================================
+function faceFromAngle(ang){const deg=(ang*180/Math.PI+360)%360;
+  if(deg>=45&&deg<135)player.dir='down';else if(deg>=135&&deg<225)player.dir='left';
+  else if(deg>=225&&deg<315)player.dir='up';else player.dir='right';}
+// apply a weapon's elemental effects to a struck target (mob or boss)
+function applyEffects(t,w){
+  if(w.slow||w.freeze){t.slowT=Math.max(t.slowT||0,1500);}           // slow for 1.5s
+  if(w.burn){t.dotT=Math.max(t.dotT||0,2000);t.dotDmg=Math.max(t.dotDmg||0,6);t.dotKind='burn';}   // 6 dmg/s, 2s
+  if(w.venom){t.dotT=Math.max(t.dotT||0,3000);t.dotDmg=Math.max(t.dotDmg||0,5);t.dotKind='venom';}  // 5 dmg/s, 3s
+  if(w.shock){t.shockT=8;t.slowT=Math.max(t.slowT||0,400);}          // brief stagger
+}
+// trees (tile 1) and pines (tile 8) can be chopped down; key = "tx,ty" -> hp remaining
+const treeHP={};
+let chips=[]; // little wood-chip particles
+function chopTreesNear(hx,hy,hr,w){
+  // scan the tiles overlapping the swing area
+  const t0x=Math.floor((hx-hr)/TILE),t1x=Math.floor((hx+hr)/TILE);
+  const t0y=Math.floor((hy-hr)/TILE),t1y=Math.floor((hy+hr)/TILE);
+  for(let ty=t0y;ty<=t1y;ty++)for(let tx=t0x;tx<=t1x;tx++){
+    if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)continue;
+    const cell=map[ty][tx];
+    if(cell!==1&&cell!==8)continue; // only trees/pines
+    const ccx=tx*TILE+TILE/2,ccy=ty*TILE+TILE/2;
+    if(Math.hypot(ccx-hx,ccy-hy)>hr+8)continue;
+    const k=tx+','+ty;
+    if(treeHP[k]===undefined)treeHP[k]=30; // tree toughness
+    treeHP[k]-=w.dmg;
+    Audio2.prick(); // woody thunk
+    // spawn chips
+    for(let i=0;i<3;i++)chips.push({x:ccx,y:ccy,vx:(Math.random()-0.5)*2,vy:-Math.random()*2-0.5,life:18});
+    if(treeHP[k]<=0){map[ty][tx]=0;delete treeHP[k];Audio2.hit();
+      for(let i=0;i<6;i++)chips.push({x:ccx,y:ccy,vx:(Math.random()-0.5)*3,vy:-Math.random()*2.5,life:24});}
+  }
+}
+function doAttack(ang){
+  if(player.attackCD>0)return;
+  const w=WEAPONS[player.weaponKey];
+  if(w.ranged){ // need arrows to fire
+    if(player.arrows<=0){Audio2.buyfail();toast('Out of arrows! Buy more at the shop');return;}
+    player.attacking=w.swing;player.attackCD=w.swing+6;player.attackAng=ang;faceFromAngle(ang);
+    player.arrows--;Audio2.shoot();const cx=player.x+player.w/2,cy=player.y+player.h/2;
+    arrows.push({x:cx,y:cy,vx:Math.cos(ang)*w.arrowSpd,vy:Math.sin(ang)*w.arrowSpd,dmg:w.dmg,life:90,w,ang});return;}
+  player.attacking=w.swing;player.attackCD=w.swing+6;player.attackAng=ang;faceFromAngle(ang);
+  Audio2.swing();
+  const cx=player.x+player.w/2,cy=player.y+player.h/2;
+  const hx=cx+Math.cos(ang)*w.range*0.5,hy=cy+Math.sin(ang)*w.range*0.5,hr=w.range*0.6;
+  chopTreesNear(hx,hy,hr,w);
+  let landed=false;
+  mobs.forEach(m=>{const mx=m.px+12,my=m.py+12;if(Math.hypot(mx-hx,my-hy)<hr){m.hp-=w.dmg;m.hit=8;landed=true;applyEffects(m,w);
+    const a=Math.atan2(my-cy,mx-cx);m.px+=Math.cos(a)*10;m.py+=Math.sin(a)*10;}});
+  bosses.forEach(b=>{if(!b.alive)return;const bx=b.px+b.size/2,by=b.py+b.size/2;
+    if(Math.hypot(bx-hx,by-hy)<hr+b.size/2){b.hp-=w.dmg;b.hit=8;landed=true;applyEffects(b,w);}});
+  if(landed)Audio2.hit();
+}
+function attackDir(){const m={up:-Math.PI/2,down:Math.PI/2,left:Math.PI,right:0};doAttack(m[player.dir]);}
+function attackToward(sx,sy){const px=player.x+player.w/2-cam.x,py=player.y+player.h/2-cam.y;doAttack(Math.atan2(sy-py,sx-px));}
+function updateArrows(){
+  arrows.forEach(a=>{a.x+=a.vx;a.y+=a.vy;a.life--;
+    if(solid(Math.floor(a.x/TILE),Math.floor(a.y/TILE))){a.life=0;return;}
+    mobs.forEach(m=>{if(m.hp<=0)return;const mx=m.px+12,my=m.py+12;if(Math.hypot(mx-a.x,my-a.y)<12){m.hp-=a.dmg;m.hit=8;if(a.w)applyEffects(m,a.w);a.life=0;Audio2.hit();}});
+    bosses.forEach(b=>{if(!b.alive)return;const bx=b.px+b.size/2,by=b.py+b.size/2;if(Math.hypot(bx-a.x,by-a.y)<b.size/2+6){b.hp-=a.dmg;b.hit=8;if(a.w)applyEffects(b,a.w);a.life=0;Audio2.hit();}});});
+  arrows=arrows.filter(a=>a.life>0);
+}
+function interact(){
+  // forge / merging station?
+  const fcx=FORGE.x*TILE+TILE/2,fcy=FORGE.y*TILE+TILE/2;
+  if(Math.hypot((player.x+8)-fcx,(player.y+9)-fcy)<38){forgeOpen=true;Audio2.ui();toast('The Forge — merge the four Warden Swords');return;}
+  // shop door?
+  const dcx=SHOP.x*TILE+TILE/2,dcy=SHOP.y*TILE+TILE/2;
+  if(Math.hypot((player.x+8)-dcx,(player.y+9)-dcy)<40){shopOpen=true;shopTab='buy';shopSel=0;Audio2.ui();toast('Welcome to the Market!');return;}
+  for(const c of chests){
+    if(c.opened)continue;const cx=c.x*TILE+TILE/2,cy=c.y*TILE+TILE/2;
+    if(Math.hypot((player.x+8)-cx,(player.y+9)-cy)<36){
+      c.opened=true;const L=c.loot;let res='ok';
+      if(L.kind==='weapon'){res=invAdd('weapon',L.key);
+        if(res==='full')toast('Bag full! Sell something and reopen');
+        else{if(WEAPONS[L.key].ranged)giveArrows(100);
+          if(L.relic){relicsFound++;Audio2.rare();toast('★ RELIC! '+WEAPONS[L.key].name+' ('+WEAPONS[L.key].dmg+' dmg) — equip in bag (I)');}
+          else{Audio2.chest();toast('Found '+WEAPONS[L.key].name+'  — equip in bag (I)');}}}
+      else if(L.kind==='armor'){res=invAdd('armor',L.key);
+        if(res==='full')toast('Bag full! Sell something and reopen');
+        else if(L.relic){Audio2.rare();toast('★ RELIC! '+ARMORS[L.key].name+' (+'+ARMORS[L.key].val+' armor) — equip in bag (I)');}
+        else{Audio2.chest();toast('Found '+ARMORS[L.key].name+'  — equip in bag (I)');}}
+      else if(L.kind==='potion'){invAdd('potion','heal',1);player.inv.forEach(s=>{if(s&&s.kind==='potion')s.val=L.val;});Audio2.chest();toast('Found Health Potion');}
+      else if(L.kind==='gold'){player.gold+=L.val;Audio2.chest();toast('Found '+L.val+' gold');}
+      if(res!=='full'&&L.kind!=='gold'){player.maxhp+=10;player.hp=Math.min(player.maxhp,player.hp+10);}
+      if(res==='full')c.opened=false; // let them retry after freeing space
+      return;
+    }
+  }
+  toast('Nothing to open here');
+}
+function damagePlayer(d){if(player.hurt>0)return;let rem=d;
+  if(player.armor>0){const absorb=Math.min(player.armor,Math.ceil(d*0.6));player.armor-=absorb;rem-=absorb;}
+  player.hp-=rem;player.hurt=24;Audio2.hurt();if(player.hp<=0)killPlayer();}
+function tickDamage(d,snd){player.hp-=d;if(snd)snd();if(player.hp<=0)killPlayer();}
+function killPlayer(){player.hp=0;GAME='dead';
+  document.getElementById('deathline').textContent=bosses.filter(b=>!b.alive).length+' of 4 Wardens freed before you fell.';
+  document.getElementById('death').classList.remove('hidden');}
+
+// ============================================================
+//  UPDATE
+// ============================================================
+let lastTime=performance.now();
+function update(dt){
+  if(GAME!=='play'||anyPanel())return;
+  let dx=0,dy=0;
+  if(keys['w']||keys['arrowup']){dy=-1;player.dir='up';}
+  if(keys['s']||keys['arrowdown']){dy=1;player.dir='down';}
+  if(keys['a']||keys['arrowleft']){dx=-1;player.dir='left';}
+  if(keys['d']||keys['arrowright']){dx=1;player.dir='right';}
+  player.moving=(dx||dy);if(dx&&dy){dx*=0.707;dy*=0.707;}
+
+  const ftx=Math.floor((player.x+8)/TILE),fty=Math.floor((player.y+14)/TILE);
+  const inWater=isWater(ftx,fty),inLava=isLava(ftx,fty),wasSwimming=player.swimming;
+  player.swimming=inWater;if(inWater&&!wasSwimming)Audio2.splash();
+
+  if(player.boostTime>0){player.boostTime-=dt;if(player.boostTime<=0){player.boostTime=0;player.boostMax=0;}}
+  const boosting=player.boostTime>0;
+  const wantSprint=(keys['shift']||boosting)&&player.moving&&!inWater&&(boosting||player.stam>0);
+  player.sprinting=wantSprint;let speed=player.baseSpeed;
+  if(inWater)speed*=0.5;
+  if(wantSprint){speed*=1.8;if(!boosting)player.stam=Math.max(0,player.stam-1.1);}
+  if(!wantSprint||boosting){if(boosting)player.stam=Math.min(player.maxstam,player.stam+0.4);
+    else player.stam=Math.min(player.maxstam,player.stam+0.5);}
+  tryMove(player,dx*speed,0);tryMove(player,0,dy*speed);
+
+  // lava 10/s
+  if(inLava){player.lavaTick+=dt;if(player.lavaTick>=1000){player.lavaTick-=1000;tickDamage(10,()=>Audio2.burn());}}
+  else player.lavaTick=0;
+  // cactus contact 2/s — check the tile the player overlaps
+  const touchCactus=isCactus(ftx,fty)||isCactus(Math.floor((player.x+3)/TILE),fty)||isCactus(Math.floor((player.x+13)/TILE),fty);
+  if(touchCactus){player.cactusTick+=dt;if(player.cactusTick>=1000){player.cactusTick-=1000;tickDamage(2,()=>Audio2.prick());}}
+  else player.cactusTick=0;
+
+  if(player.sprinting&&player.moving)player.trail.push({x:player.x,y:player.y,dir:player.dir,life:10,boost:boosting});
+  player.trail.forEach(t=>t.life--);player.trail=player.trail.filter(t=>t.life>0);
+
+  if(player.moving){player.ftick++;if(player.ftick>(player.sprinting?5:(inWater?12:8))){player.ftick=0;player.frame=(player.frame+1)%4;}}
+  else player.frame=0;
+  if(player.attacking>0)player.attacking--;
+  if(player.attackCD>0)player.attackCD--;
+  if(player.hurt>0)player.hurt--;
+
+  cam.x=clamp(player.x-VIEW_W/2,0,MAP_W*TILE-VIEW_W);
+  cam.y=clamp(player.y-VIEW_H/2,0,MAP_H*TILE-VIEW_H);
+  updateArrows();
+  chips.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=0.18;p.life--;});chips=chips.filter(p=>p.life>0);
+
+  mobs.forEach(m=>{if(m.hp<=0)return;
+    tickEffects(m,dt);
+    const slowF=(m.slowT>0)?0.4:1;
+    if(m.shockT>0){m.shockT--;if(m.hit>0)m.hit--;return;} // frozen in place briefly
+    const mx=m.px+12,my=m.py+12,pcx=player.x+8,pcy=player.y+9,dist=Math.hypot(pcx-mx,pcy-my);
+    if(dist>700){if(m.hit>0)m.hit--;return;}
+    if(dist<160){const a=Math.atan2(pcy-my,pcx-mx),sp=m.speed*slowF,ox=Math.cos(a)*sp,oy=Math.sin(a)*sp;
+      // enemies cannot enter water/lava/solid
+      if(!enemyBlocked(Math.floor((mx+ox)/TILE),Math.floor(my/TILE)))m.px+=ox;
+      if(!enemyBlocked(Math.floor(mx/TILE),Math.floor((my+oy)/TILE)))m.py+=oy;}
+    else{m.wob+=0.05;
+      const nx=Math.cos(m.wob)*0.3*slowF,ny=Math.sin(m.wob*0.7)*0.3*slowF;
+      if(!enemyBlocked(Math.floor((mx+nx)/TILE),Math.floor((my+ny)/TILE))){m.px+=nx;m.py+=ny;}}
+    if(dist<16)damagePlayer(m.dmg);if(m.hit>0)m.hit--;});
+  mobs=mobs.filter(m=>{if(m.hp<=0){wispKills++;return false;}return true;});
+
+  bosses.forEach(b=>{if(!b.alive)return;
+    tickEffects(b,dt);
+    const slowF=(b.slowT>0)?0.45:1;
+    const bx=b.px+b.size/2,by=b.py+b.size/2,pcx=player.x+8,pcy=player.y+9,dist=Math.hypot(pcx-bx,pcy-by);
+    if(b.shockT>0){b.shockT--;}
+    else if(dist>b.size/2+b.reach-6&&dist<1400){
+      const a=Math.atan2(pcy-by,pcx-bx);let sp=b.speed*(b.lunge>0?1.8:1)*slowF;
+      const ox=Math.cos(a)*sp,oy=Math.sin(a)*sp;
+      // bosses blocked by water/lava/solid; slide along blocked axis
+      if(!enemyBlocked(Math.floor((bx+ox)/TILE),Math.floor(by/TILE)))b.px+=ox;
+      else if(!enemyBlocked(Math.floor(bx/TILE),Math.floor((by+Math.sign(oy||1)*sp)/TILE)))b.py+=Math.sign(oy||1)*sp;
+      if(!enemyBlocked(Math.floor(bx/TILE),Math.floor((by+oy)/TILE)))b.py+=oy;
+      else if(!enemyBlocked(Math.floor((bx+Math.sign(ox||1)*sp)/TILE),Math.floor(by/TILE)))b.px+=Math.sign(ox||1)*sp;
+    }
+    if(b.lunge>0)b.lunge--;
+    if(dist<b.size/2+b.reach&&b.shockT<=0){b.atk++;if(b.atk>26){b.atk=0;b.lunge=10;damagePlayer(b.dmg);}}
+    else if(b.atk>0)b.atk--;
+    if(b.hit>0)b.hit--;
+    if(b.hp<=0){b.alive=false;Audio2.bossDown();invAdd('weapon',b.dropW);invAdd('armor',b.dropA);
+      toast(b.name+' falls!  Dropped '+WEAPONS[b.dropW].name+' + '+ARMORS[b.dropA].name+' — equip in bag (I)');
+      if(bosses.every(x=>!x.alive)){GAME='win';document.getElementById('win').classList.remove('hidden');Audio2.win();}}});
+  checkQuests();
+}
+// decay status timers and apply damage-over-time
+function tickEffects(t,dt){
+  if(t.slowT>0)t.slowT-=dt;
+  if(t.dotT>0){t.dotT-=dt;t._dotAcc=(t._dotAcc||0)+dt;
+    if(t._dotAcc>=1000){t._dotAcc-=1000;t.hp-=(t.dotDmg||5);t.hit=Math.max(t.hit,4);}}
+}
+function tryMove(p,mx,my){const nx=p.x+mx,ny=p.y+my,bx=nx+3,by=ny+8,bw=p.w-6,bh=p.h-8;
+  const pts=[[bx,by],[bx+bw,by],[bx,by+bh],[bx+bw,by+bh]];
+  for(const[px,py]of pts)if(solid(Math.floor(px/TILE),Math.floor(py/TILE)))return;
+  p.x=nx;p.y=ny;}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+
+// ============================================================
+//  RENDER
+// ============================================================
+function draw(){
+  ctx.fillStyle=C.void;ctx.fillRect(0,0,VIEW_W,VIEW_H);
+  if(GAME==='title')return;
+  const t0x=Math.floor(cam.x/TILE),t0y=Math.floor(cam.y/TILE);
+  const t1x=Math.ceil((cam.x+VIEW_W)/TILE),t1y=Math.ceil((cam.y+VIEW_H)/TILE);
+  for(let ty=t0y;ty<t1y;ty++)for(let tx=t0x;tx<t1x;tx++){
+    if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)continue;drawTile(tx,ty,map[ty][tx]);}
+  drawShop();
+  drawForge();
+  drawMarkerTrail();
+  chests.forEach(c=>{const sx=c.x*TILE-cam.x,sy=c.y*TILE-cam.y;
+    if(sx<-TILE||sy<-TILE||sx>VIEW_W||sy>VIEW_H)return;drawChest(sx+4,sy+6,c.opened,c.biome);});
+  drawSpeedLines();
+  arrows.forEach(a=>{const x=a.x-cam.x,y=a.y-cam.y;ctx.save();ctx.translate(x,y);ctx.rotate(a.ang);
+    ctx.fillStyle=(a.w&&a.w.burn)?C.ember:C.arrow;ctx.fillRect(-6,-1,10,2);ctx.fillStyle=C.bone;ctx.fillRect(3,-1,3,2);ctx.restore();});
+  // wood chips from chopping trees
+  chips.forEach(p=>{ctx.fillStyle=(p.life>14?'#8a5a30':'#6b4423');ctx.fillRect(Math.floor(p.x-cam.x),Math.floor(p.y-cam.y),2,2);});
+  const actors=[];
+  mobs.forEach(m=>{const sx=m.px-cam.x,sy=m.py-cam.y;if(sx>-30&&sy>-30&&sx<VIEW_W+30&&sy<VIEW_H+30)actors.push({y:m.py,draw:()=>drawMob(m)});});
+  bosses.forEach(b=>{if(b.alive)actors.push({y:b.py,draw:()=>drawBoss(b)});});
+  actors.push({y:player.y,draw:drawPlayer});
+  actors.sort((a,b)=>a.y-b.y);actors.forEach(a=>a.draw());
+  drawOffscreenBossArrows();
+  drawAimReticle();
+  drawHUD();drawMinimap();
+  if(invOpen)drawInventory();
+  if(questOpen)drawQuests();
+  if(mapOpen)drawWorldMap();
+  if(shopOpen)drawShop_UI();
+  if(forgeOpen)drawForge_UI();
+}
+
+// dithering helper for nicer gradients
+function dither(sx,sy,w,h,col,density){ctx.fillStyle=col;
+  for(let yy=0;yy<h;yy+=2)for(let xx=((yy/2)%2)*2;xx<w;xx+=4){if(((xx*7+yy*3)%density)===0)ctx.fillRect(sx+xx,sy+yy,1,1);}}
+
+function drawShop(){
+  // draw building body sitting on plaza, with depth
+  const bx=SHOP_RECT.x0*TILE-cam.x, by=SHOP_RECT.y0*TILE-cam.y;
+  const bw=(SHOP_RECT.x1-SHOP_RECT.x0+1)*TILE, bh=(SHOP_RECT.y1-SHOP_RECT.y0+1)*TILE;
+  if(bx>VIEW_W||by>VIEW_H||bx+bw<0||by+bh<-TILE*2)return;
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,.35)';ctx.fillRect(bx-2,by+bh-3,bw+8,8);
+  // walls
+  ctx.fillStyle=C.wallB;ctx.fillRect(bx,by,bw,bh);
+  ctx.fillStyle=C.wallA;ctx.fillRect(bx+2,by+2,bw-4,bh-6);
+  // plank lines
+  ctx.fillStyle=C.woodDk;for(let i=1;i<5;i++)ctx.fillRect(bx+2,by+2+i*((bh-6)/5),bw-4,1);
+  // roof (overhang)
+  ctx.fillStyle=C.roofDk;ctx.fillRect(bx-4,by-14,bw+8,16);
+  ctx.fillStyle=C.roof;ctx.fillRect(bx-4,by-14,bw+8,10);
+  for(let i=0;i<bw+8;i+=6){ctx.fillStyle=(i/6%2)?C.roof:C.roofDk;ctx.fillRect(bx-4+i,by-14,3,10);}
+  // door at bottom-center (the SHOP tile)
+  const dx=SHOP.x*TILE-cam.x, dyy=(SHOP.y-1)*TILE-cam.y;
+  ctx.fillStyle='#2a1c10';ctx.fillRect(dx+4,dyy+6,TILE-8,TILE-2);
+  ctx.fillStyle=C.gold;ctx.fillRect(dx+TILE-9,dyy+TILE/2+2,2,2); // handle
+  // hanging sign
+  ctx.fillStyle=C.woodDk;ctx.fillRect(bx+bw/2-12,by-2,24,2);
+  ctx.fillStyle=C.sign;ctx.fillRect(bx+bw/2-12,by,24,10);
+  ctx.fillStyle='#000';ctx.font='6px "Press Start 2P"';ctx.fillText('SHOP',bx+bw/2-11,by+8);
+  // little coin icon glints
+  if(Math.floor(Date.now()/400)%2){ctx.fillStyle=C.gold;ctx.fillRect(bx+bw/2+13,by+2,3,3);}
+  // "press E" prompt when near
+  const dcx=SHOP.x*TILE+TILE/2,dcy=SHOP.y*TILE+TILE/2;
+  if(Math.hypot((player.x+8)-dcx,(player.y+9)-dcy)<40){
+    ctx.fillStyle='rgba(13,11,20,.85)';ctx.fillRect(dx-12,dyy+TILE+2,TILE+24,12);
+    ctx.fillStyle=C.gold;ctx.font='6px "Press Start 2P"';ctx.fillText('press E to enter',dx-10,dyy+TILE+11);
+  }
+}
+
+// in-world forge: a stone base + anvil, with rising heat shimmer
+function drawForge(){
+  const ax=FORGE.x*TILE-cam.x, ay=FORGE.y*TILE-cam.y;
+  if(ax<-TILE*2||ay<-TILE*2||ax>VIEW_W+TILE||ay>VIEW_H+TILE)return;
+  // shadow
+  ctx.fillStyle='rgba(0,0,0,.35)';ctx.fillRect(ax+1,ay+TILE-3,TILE-1,5);
+  // stone base
+  ctx.fillStyle=C.stoneDk;ctx.fillRect(ax+2,ay+13,TILE-4,9);
+  ctx.fillStyle=C.stone;ctx.fillRect(ax+3,ay+13,TILE-6,4);
+  // glowing coals in the base
+  const g=Math.floor(Date.now()/180)%2;
+  ctx.fillStyle=g?C.lavaLite:C.lava;ctx.fillRect(ax+6,ay+18,4,2);ctx.fillRect(ax+13,ay+19,3,2);
+  // anvil (dark iron)
+  ctx.fillStyle='#1c1c22';ctx.fillRect(ax+5,ay+8,14,5);     // top
+  ctx.fillStyle='#2c2c34';ctx.fillRect(ax+6,ay+8,12,2);
+  ctx.fillStyle='#1c1c22';ctx.fillRect(ax+9,ay+12,6,3);     // waist
+  ctx.fillStyle='#34343c';ctx.fillRect(ax+3,ay+8,3,2);      // horn
+  // heat shimmer / sparks
+  if(g){ctx.fillStyle=C.lavaGlow;ctx.fillRect(ax+8,ay+5,1,1);ctx.fillRect(ax+14,ay+4,1,1);}
+  // floating hammer glint
+  ctx.fillStyle=C.steel;ctx.fillRect(ax+TILE-6,ay+3,2,5);ctx.fillStyle=C.wood;ctx.fillRect(ax+TILE-5,ay+7,1,4);
+  // prompt + parts counter when near
+  const fcx=FORGE.x*TILE+TILE/2,fcy=FORGE.y*TILE+TILE/2;
+  if(Math.hypot((player.x+8)-fcx,(player.y+9)-fcy)<38){
+    const have=partsCollected();
+    ctx.fillStyle='rgba(13,11,20,.85)';ctx.fillRect(ax-20,ay+TILE+2,TILE+40,20);
+    ctx.fillStyle=C.gold;ctx.font='6px "Press Start 2P"';ctx.fillText('press E: FORGE',ax-16,ay+TILE+11);
+    ctx.fillStyle=hasPart('excalibur')||player.weaponKey==='excalibur'?C.grassLite:C.bone;
+    ctx.fillText('swords '+have+'/4',ax-12,ay+TILE+19);
+  }
+}
+
+function drawMarkerTrail(){
+  if(!marker)return;
+  const px=player.x+player.w/2-cam.x,py=player.y+player.h/2-cam.y;
+  const mx=marker.tx*TILE+TILE/2-cam.x,my=marker.ty*TILE+TILE/2-cam.y;
+  const ang=Math.atan2(my-py,mx-px),totalDist=Math.hypot(mx-px,my-py);
+  const t=Date.now()/180,gap=12,dotLen=5;
+  ctx.strokeStyle='rgba(233,196,106,.75)';ctx.lineWidth=2;
+  for(let d=10;d<Math.min(totalDist,9000);d+=gap){
+    const x1=px+Math.cos(ang)*d,y1=py+Math.sin(ang)*d,x2=px+Math.cos(ang)*(d+dotLen),y2=py+Math.sin(ang)*(d+dotLen);
+    if(x1<-20||y1<-20||x1>VIEW_W+20||y1>VIEW_H+20)continue;
+    ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();}
+  if(mx>=0&&my>=0&&mx<=VIEW_W&&my<=VIEW_H){
+    ctx.fillStyle='#fff';ctx.fillRect(mx-1,my-14,2,14);
+    ctx.fillStyle=C.blood;ctx.beginPath();ctx.moveTo(mx+1,my-14);ctx.lineTo(mx+10,my-11);ctx.lineTo(mx+1,my-8);ctx.fill();
+  } else {
+    const ex=clamp(mx,16,VIEW_W-16),ey=clamp(my,16,VIEW_H-16);
+    ctx.save();ctx.translate(ex,ey);ctx.rotate(ang);
+    ctx.fillStyle=C.gold;ctx.beginPath();ctx.moveTo(8,0);ctx.lineTo(-6,-5);ctx.lineTo(-6,5);ctx.fill();ctx.restore();
+    const meters=Math.round(Math.hypot(marker.tx-(player.x/TILE),marker.ty-(player.y/TILE))*METERS_PER_TILE);
+    ctx.fillStyle=C.gold;ctx.font='7px "Press Start 2P"';ctx.fillText(meters+'m',ex-14,ey-10);}
+}
+function drawOffscreenBossArrows(){
+  bosses.forEach(b=>{if(!b.alive)return;const bx=b.px+b.size/2-cam.x,by=b.py+b.size/2-cam.y;
+    if(bx>=0&&by>=0&&bx<=VIEW_W&&by<=VIEW_H)return;
+    const cx=VIEW_W/2,cy=VIEW_H/2,ang=Math.atan2(by-cy,bx-cx),ex=clamp(bx,12,VIEW_W-12),ey=clamp(by,12,VIEW_H-12);
+    ctx.save();ctx.translate(ex,ey);ctx.rotate(ang);ctx.fillStyle='rgba(188,71,73,.8)';
+    ctx.beginPath();ctx.moveTo(7,0);ctx.lineTo(-5,-4);ctx.lineTo(-5,4);ctx.fill();ctx.restore();});
+}
+function drawAimReticle(){if(anyPanel())return;
+  ctx.strokeStyle='rgba(233,196,106,.5)';ctx.lineWidth=1;
+  ctx.beginPath();ctx.arc(mouse.x,mouse.y,5,0,7);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(mouse.x-8,mouse.y);ctx.lineTo(mouse.x-3,mouse.y);
+  ctx.moveTo(mouse.x+3,mouse.y);ctx.lineTo(mouse.x+8,mouse.y);ctx.stroke();}
+function drawSpeedLines(){player.trail.forEach(t=>{
+  const x=Math.floor(t.x-cam.x),y=Math.floor(t.y-cam.y),alpha=t.life/10,off=(10-t.life);
+  ctx.strokeStyle=(t.boost?'rgba(255,210,61,':'rgba(255,255,255,')+(alpha*0.55)+')';ctx.lineWidth=1;
+  for(let i=0;i<3;i++){if(t.dir==='left'||t.dir==='right'){const ds=t.dir==='left'?1:-1,yy=y+3+i*5;
+    ctx.beginPath();ctx.moveTo(x+8+ds*off,yy);ctx.lineTo(x+8+ds*(off+7),yy);ctx.stroke();}
+    else{const ds=t.dir==='up'?1:-1,xx=x+3+i*5;ctx.beginPath();ctx.moveTo(xx,y+9+ds*off);ctx.lineTo(xx,y+9+ds*(off+7));ctx.stroke();}}});}
+
+// ---- richer tile rendering ----
+function drawTile(tx,ty,t){
+  const sx=Math.floor(tx*TILE-cam.x),sy=Math.floor(ty*TILE-cam.y);
+  const v=((tx*7+ty*13)%4),v2=((tx*3+ty*11)%3),tm=Date.now();
+  switch(t){
+    case 16:{ // shop plaza cobblestone
+      ctx.fillStyle='#7d7468';ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle='#8d8478';for(let yy=0;yy<TILE;yy+=8)for(let xx=((yy/8)%2)*8;xx<TILE;xx+=16)ctx.fillRect(sx+xx+1,sy+yy+1,6,6);
+      ctx.fillStyle='#5e564c';ctx.fillRect(sx,sy+TILE-1,TILE,1);ctx.fillRect(sx+TILE-1,sy,1,TILE);break;}
+    case 2:{ // water w/ animated highlights + foam edge
+      ctx.fillStyle=C.water;ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.waterDk;ctx.fillRect(sx+2,sy+((Math.floor(tm/400)+tx)%2*6)+4,9,2);ctx.fillRect(sx+13,sy+14,8,2);
+      ctx.fillStyle=C.waterLite;ctx.fillRect(sx+5,sy+((Math.floor(tm/500)+ty)%2*5)+9,5,1);ctx.fillRect(sx+15,sy+5,4,1);
+      // foam where adjacent to land
+      if(!isWater(tx,ty-1)&&map[ty-1]&&map[ty-1][tx]!==undefined){ctx.fillStyle=C.waterFoam;ctx.fillRect(sx,sy,TILE,2);}
+      break;}
+    case 3:{ctx.fillStyle=C.sand;ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.sandLite;ctx.fillRect(sx+2,sy+2,TILE-4,2);
+      ctx.fillStyle=C.sandDk;ctx.fillRect(sx+5+v,sy+9,2,2);ctx.fillRect(sx+15,sy+16,2,2);ctx.fillRect(sx+9,sy+13,2,2);break;}
+    case 4:{ctx.fillStyle=C.stoneDk;ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.stone;ctx.fillRect(sx+2,sy+2,TILE-4,TILE-7);
+      ctx.fillStyle=C.stoneLite;ctx.fillRect(sx+4,sy+3,TILE-12,3);ctx.fillRect(sx+3,sy+9,4,3);
+      ctx.fillStyle=C.stoneDk;ctx.fillRect(sx+12,sy+11,5,4);
+      ctx.fillStyle=C.shadow;ctx.fillRect(sx,sy+TILE-3,TILE,3);break;}
+    case 5:{ctx.fillStyle=C.path;ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.pathDk;ctx.fillRect(sx+3+v2*2,sy+6,3,3);ctx.fillRect(sx+14,sy+15,3,3);ctx.fillRect(sx+8,sy+11,2,2);
+      ctx.fillStyle='#b89a72';ctx.fillRect(sx+2,sy+2,3,2);break;}
+    case 6:{ctx.fillStyle=(v%2?C.grass:C.grass2);ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.grassLite;ctx.fillRect(sx+4+v,sy+15,2,4);ctx.fillRect(sx+16,sy+6,2,4);
+      // flower cluster
+      ctx.fillStyle=C.gold;ctx.fillRect(sx+6,sy+7,3,3);ctx.fillStyle='#e88';ctx.fillRect(sx+15,sy+12,3,3);
+      ctx.fillStyle='#fff';ctx.fillRect(sx+7,sy+8,1,1);ctx.fillStyle=C.grassDk;ctx.fillRect(sx+7,sy+10,1,3);break;}
+    case 1:{ctx.fillStyle=(v%2?C.grass:C.grass2);ctx.fillRect(sx,sy,TILE,TILE);
+      // trunk
+      ctx.fillStyle=C.woodDk;ctx.fillRect(sx+10,sy+14,4,7);ctx.fillStyle=C.wood;ctx.fillRect(sx+10,sy+14,2,7);
+      // layered canopy
+      ctx.fillStyle=C.treeShade;ctx.fillRect(sx+2,sy+2,20,13);
+      ctx.fillStyle=C.tree;ctx.fillRect(sx+3,sy+1,17,12);
+      ctx.fillStyle=C.treeTop;ctx.fillRect(sx+5,sy+2,12,7);
+      ctx.fillStyle='#4f8557';ctx.fillRect(sx+6,sy+3,4,3);ctx.fillRect(sx+13,sy+5,3,2);
+      ctx.fillStyle=C.shadow;ctx.fillRect(sx+3,sy+13,17,2);break;}
+    case 7:{ctx.fillStyle=(v%2?C.snow:C.snowDk);ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.snowLite;ctx.fillRect(sx+2,sy+2,TILE-5,2);
+      ctx.fillStyle='#cdd8e4';ctx.fillRect(sx+5+v,sy+9,2,2);ctx.fillRect(sx+15,sy+15,2,2);
+      ctx.fillStyle='#fff';ctx.fillRect(sx+9,sy+17,2,2);ctx.fillRect(sx+17,sy+6,1,1);break;}
+    case 8:{ctx.fillStyle=(v%2?C.snow:C.snowDk);ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.woodDk;ctx.fillRect(sx+10,sy+17,4,5);
+      ctx.fillStyle=C.pine;ctx.beginPath();ctx.moveTo(sx+12,sy);ctx.lineTo(sx+3,sy+12);ctx.lineTo(sx+21,sy+12);ctx.closePath();ctx.fill();
+      ctx.fillStyle=C.pineTop;ctx.beginPath();ctx.moveTo(sx+12,sy+2);ctx.lineTo(sx+6,sy+10);ctx.lineTo(sx+18,sy+10);ctx.closePath();ctx.fill();
+      ctx.fillStyle=C.pineLite;ctx.beginPath();ctx.moveTo(sx+12,sy+3);ctx.lineTo(sx+8,sy+8);ctx.lineTo(sx+14,sy+8);ctx.closePath();ctx.fill();
+      ctx.fillStyle='#fff';ctx.fillRect(sx+11,sy+2,2,2);ctx.fillRect(sx+6,sy+11,3,1);break;}
+    case 9:{ctx.fillStyle=C.ice;ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.iceDk;ctx.fillRect(sx+2,sy+TILE-3,TILE-4,2);
+      ctx.fillStyle='#c8e8f0';ctx.fillRect(sx+2,sy+2,TILE-6,3);ctx.fillRect(sx+6,sy+10,TILE-10,2);
+      ctx.fillStyle='#fff';ctx.fillRect(sx+4,sy+4,3,1);ctx.fillRect(sx+14,sy+13,2,1);break;}
+    case 10:{ctx.fillStyle=(v%2?C.dune:C.sand);ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.duneDk;ctx.fillRect(sx+1,sy+9,TILE-2,2);ctx.fillRect(sx+5,sy+17,TILE-9,1);
+      ctx.fillStyle=C.sandLite;ctx.fillRect(sx+2,sy+3,TILE-6,1);break;}
+    case 11:{ctx.fillStyle=(v%2?C.dune:C.sand);ctx.fillRect(sx,sy,TILE,TILE);
+      // chunkier cactus w/ shading + spines
+      ctx.fillStyle=C.cactusDk;ctx.fillRect(sx+9,sy+4,6,17);
+      ctx.fillStyle=C.cactus;ctx.fillRect(sx+9,sy+4,4,17);
+      ctx.fillStyle=C.cactusLite;ctx.fillRect(sx+9,sy+4,1,17);
+      ctx.fillStyle=C.cactusDk;ctx.fillRect(sx+4,sy+9,5,3);ctx.fillStyle=C.cactus;ctx.fillRect(sx+4,sy+9,5,2);
+      ctx.fillStyle=C.cactusDk;ctx.fillRect(sx+15,sy+11,4,3);ctx.fillStyle=C.cactus;ctx.fillRect(sx+15,sy+11,4,2);
+      // spines
+      ctx.fillStyle='#dfe7c0';ctx.fillRect(sx+8,sy+7,1,1);ctx.fillRect(sx+13,sy+10,1,1);ctx.fillRect(sx+8,sy+14,1,1);ctx.fillRect(sx+13,sy+16,1,1);break;}
+    case 12:{const f=Math.floor(tm/220+tx*2+ty)%4;
+      ctx.fillStyle=C.lavaDk;ctx.fillRect(sx,sy,TILE,TILE);ctx.fillStyle=C.lava;ctx.fillRect(sx+1,sy+1,TILE-2,TILE-2);
+      ctx.fillStyle=C.lavaLite;ctx.fillRect(sx+3+f*2,sy+4,4,3);ctx.fillRect(sx+13,sy+9+(f%2),5,3);ctx.fillRect(sx+6,sy+16,3,3);
+      ctx.fillStyle=C.lavaGlow;ctx.fillRect(sx+14+(f%2)*2,sy+5,2,2);ctx.fillRect(sx+5+f,sy+12,1,1);break;}
+    case 13:{ctx.fillStyle=C.rockDk;ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.rock;ctx.fillRect(sx+2,sy+2,TILE-4,TILE-6);
+      ctx.fillStyle='#7a5a4c';ctx.fillRect(sx+4,sy+3,TILE-12,3);
+      ctx.fillStyle=C.lava;ctx.fillRect(sx+6,sy+10,3,2);ctx.fillRect(sx+13,sy+14,2,2);break;}
+    case 14:{ctx.fillStyle=(v%2?C.ash:C.ashDk);ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=C.ashLite;ctx.fillRect(sx+5+v,sy+8,2,2);ctx.fillRect(sx+15,sy+15,2,2);
+      if((tx*3+ty)%5===0){ctx.fillStyle=C.lava;ctx.fillRect(sx+10,sy+12,2,2);ctx.fillStyle=C.lavaLite;ctx.fillRect(sx+10,sy+12,1,1);}break;}
+    case 15:{ctx.fillStyle=C.rockDk;ctx.fillRect(sx,sy,TILE,TILE);ctx.fillStyle=C.rock;ctx.fillRect(sx+1,sy+1,TILE-2,TILE-2);
+      const g=Math.floor(tm/200)%2;ctx.fillStyle=C.lavaLite;ctx.fillRect(sx+7,sy+7,10,10);
+      ctx.fillStyle=g?C.lavaGlow:'#ffd98a';ctx.fillRect(sx+9,sy+9,6,6);break;}
+    default:{ctx.fillStyle=(v%2?C.grass:C.grass2);ctx.fillRect(sx,sy,TILE,TILE);
+      ctx.fillStyle=(v2?C.grassLite:C.grassDk);ctx.fillRect(sx+4+v,sy+16,2,3);ctx.fillRect(sx+15,sy+6,2,3);
+      ctx.fillStyle=C.grassDk;ctx.fillRect(sx+9,sy+11,1,2);}
+  }
+}
+
+function drawChest(x,y,opened,biome){x=Math.floor(x);y=Math.floor(y);
+  ctx.fillStyle='rgba(0,0,0,.35)';ctx.fillRect(x-1,y+15,18,3);
+  const tint=(BIOME_LOOT[biome]&&BIOME_LOOT[biome].tint)||C.gold;
+  ctx.fillStyle=C.woodDk;ctx.fillRect(x,y+6,16,11);ctx.fillStyle=C.wood;ctx.fillRect(x+1,y+7,14,9);
+  if(opened){ctx.fillStyle=C.stoneDk;ctx.fillRect(x,y+1,16,5);ctx.fillStyle='#1c130a';ctx.fillRect(x+2,y+8,12,6);}
+  else{ctx.fillStyle='#a8723e';ctx.fillRect(x,y+3,16,5);ctx.fillStyle='#bd854c';ctx.fillRect(x+1,y+3,14,2);
+    ctx.fillStyle=tint;ctx.fillRect(x+6,y+6,4,5);ctx.fillStyle='#fff';ctx.fillRect(x+7,y+7,1,1);
+    ctx.fillStyle=tint;ctx.fillRect(x,y+10,16,1);
+    if(Math.floor(Date.now()/300)%2){ctx.fillStyle=tint;ctx.fillRect(x+13,y,2,2);ctx.fillStyle='#fff';ctx.fillRect(x+13,y,1,1);}}
+}
+
+function drawPlayer(){
+  const x=Math.floor(player.x-cam.x),y=Math.floor(player.y-cam.y),swim=player.swimming;
+  // boost aura
+  if(player.boostTime>0){const r=10+Math.sin(Date.now()/100)*2;ctx.strokeStyle='rgba(255,210,61,.4)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(x+8,y+10,r,0,7);ctx.stroke();}
+  if(swim){ctx.fillStyle='rgba(47,115,160,.55)';ctx.fillRect(x,y+10,16,8);ctx.fillStyle=C.waterFoam;ctx.fillRect(x-2,y+14,20,1);}
+  else{ctx.fillStyle='rgba(0,0,0,.35)';ctx.fillRect(x+2,y+16,12,4);}
+  const flash=player.hurt>0&&Math.floor(player.hurt/3)%2;
+  const skin=flash?'#fff':'#e8b487',skinD='#c98e63',tunic=flash?'#fff':'#43825f',tunicD='#2f5e44',hair='#5a3a22',submerge=swim?5:0;
+  const bob=player.moving?(player.frame%2?1:0):0;
+  if(!swim){ctx.fillStyle='#27384a';ctx.fillRect(x+4,y+13+bob,3,5);ctx.fillRect(x+9,y+13+(bob?0:1),3,5);
+    ctx.fillStyle='#1c2a38';ctx.fillRect(x+4,y+17,3,1);ctx.fillRect(x+9,y+17,3,1);}
+  // body w/ shading
+  ctx.fillStyle=tunicD;ctx.fillRect(x+3,y+7,10,7-submerge);ctx.fillStyle=tunic;ctx.fillRect(x+3,y+7,8,7-submerge);
+  if(player.equippedArmor&&!swim){const ac=flash?'#fff':ARMORS[player.equippedArmor].color;
+    ctx.fillStyle=ac;ctx.fillRect(x+4,y+8,8,4);ctx.fillStyle='rgba(255,255,255,.3)';ctx.fillRect(x+4,y+8,8,1);}
+  // head
+  ctx.fillStyle=skinD;ctx.fillRect(x+4,y+1,8,7);ctx.fillStyle=skin;ctx.fillRect(x+4,y+1,7,6);
+  ctx.fillStyle=hair;ctx.fillRect(x+4,y,8,3);ctx.fillStyle='#6e4a2c';ctx.fillRect(x+4,y,7,1);
+  ctx.fillStyle=C.shadow;
+  if(player.dir==='down'){ctx.fillRect(x+5,y+4,2,2);ctx.fillRect(x+9,y+4,2,2);}
+  else if(player.dir==='up'){ctx.fillStyle=hair;ctx.fillRect(x+4,y+1,8,5);}
+  else if(player.dir==='left'){ctx.fillRect(x+4,y+4,2,2);}else{ctx.fillRect(x+10,y+4,2,2);}
+  if(player.attacking>0){if(WEAPONS[player.weaponKey].ranged)drawBowPose(x+8,y+9);else drawSwing(x+8,y+9);}
+}
+function drawSwing(cx,cy){const w=WEAPONS[player.weaponKey];const prog=1-(player.attacking/w.swing);
+  const ang=player.attackAng-0.8+prog*1.6,len=w.range*0.55,ex=cx+Math.cos(ang)*len,ey=cy+Math.sin(ang)*len;
+  ctx.strokeStyle='rgba(255,255,255,.25)';ctx.lineWidth=6;ctx.beginPath();ctx.arc(cx,cy,len,ang-0.5,ang+0.2);ctx.stroke();
+  ctx.strokeStyle=w.color;ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(ex,ey);ctx.stroke();
+  ctx.fillStyle=w.color;ctx.fillRect(ex-2,ey-2,4,4);if(w.burn){ctx.fillStyle=C.lavaLite;ctx.fillRect(ex-1,ey-1,2,2);}}
+function drawBowPose(cx,cy){const w=WEAPONS[player.weaponKey],ang=player.attackAng;
+  const bx=cx+Math.cos(ang)*8,by=cy+Math.sin(ang)*8;ctx.strokeStyle=w.color;ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(bx,by,6,ang-1.4,ang+1.4);ctx.stroke();}
+
+function drawMob(m){const x=Math.floor(m.px-cam.x),y=Math.floor(m.py-cam.y);
+  ctx.fillStyle='rgba(0,0,0,.3)';ctx.fillRect(x+4,y+18,14,4);
+  const flash=m.hit>0?'#fff':null,wob=Math.sin(Date.now()/150+m.wob)*2;
+  // smoky body
+  ctx.fillStyle=flash||'#1f1730';ctx.fillRect(x+4,y+4+wob,14,14);
+  ctx.fillStyle=flash||'#352952';ctx.fillRect(x+5,y+5+wob,12,10);
+  ctx.fillStyle=flash||'#473a66';ctx.fillRect(x+7,y+7+wob,8,5);
+  ctx.fillStyle=flash?'#000':C.blood;ctx.fillRect(x+7,y+9+wob,3,3);ctx.fillRect(x+13,y+9+wob,3,3);
+  ctx.fillStyle=flash?'#000':'#ff8a8a';ctx.fillRect(x+8,y+10+wob,1,1);ctx.fillRect(x+14,y+10+wob,1,1);
+  ctx.fillStyle=flash||'#1f1730';ctx.fillRect(x+5,y+16+wob,3,3);ctx.fillRect(x+10,y+17+wob,3,3);ctx.fillRect(x+15,y+16+wob,3,3);
+  if(m.hp<m.max)bar(x+3,y-2,16,2,m.hp/m.max,C.blood);}
+
+function drawBoss(b){const x=Math.floor(b.px-cam.x),y=Math.floor(b.py-cam.y),s=b.size;
+  if(x<-s-20||y<-s-20||x>VIEW_W+20||y>VIEW_H+20)return;
+  ctx.fillStyle='rgba(0,0,0,.4)';ctx.fillRect(x+2,y+s-2,s-2,5);
+  ctx.fillStyle='rgba(120,40,60,.2)';ctx.beginPath();ctx.arc(x+s/2,y+s/2,s*0.9,0,7);ctx.fill();
+  const flash=b.hit>0?'#fff':null;
+  if(b.atk>14){ctx.strokeStyle='rgba(255,60,60,.6)';ctx.lineWidth=2;ctx.beginPath();ctx.arc(x+s/2,y+s/2,b.reach,0,7);ctx.stroke();}
+  ctx.fillStyle=flash||'#000';ctx.fillRect(x+1,y+5,s-2,s-6);
+  ctx.fillStyle=flash||b.color;ctx.fillRect(x+2,y+6,s-4,s-8);
+  ctx.fillStyle=flash||b.accent;ctx.fillRect(x+5,y+9,s-10,8);
+  ctx.fillStyle='rgba(255,255,255,.25)';ctx.fillRect(x+5,y+9,s-10,2);
+  ctx.fillStyle=flash||b.accent;ctx.fillRect(x+3,y,4,7);ctx.fillRect(x+s-7,y,4,7);ctx.fillRect(x+s/2-2,y-2,4,8);
+  ctx.fillStyle=flash?'#000':'#ffea00';ctx.fillRect(x+7,y+11,4,4);ctx.fillRect(x+s-11,y+11,4,4);
+  ctx.fillStyle=flash?'#000':'#fff';ctx.fillRect(x+8,y+12,1,1);ctx.fillRect(x+s-10,y+12,1,1);
+  bar(x-6,y-12,s+12,5,b.hp/b.max,C.blood);
+  ctx.fillStyle=C.bone;ctx.font='6px "Press Start 2P"';ctx.fillText(b.name.toUpperCase(),x-14,y-15);
+  ctx.fillStyle='#9b94a8';ctx.font='5px "Press Start 2P"';ctx.fillText(Math.max(0,Math.ceil(b.hp))+'/'+b.max,x-2,y-4);}
+
+function bar(x,y,w,h,pct,col){ctx.fillStyle='#000';ctx.fillRect(x-1,y-1,w+2,h+2);
+  ctx.fillStyle=C.stoneDk;ctx.fillRect(x,y,w,h);ctx.fillStyle=col;ctx.fillRect(x,y,Math.max(0,w*pct),h);
+  ctx.fillStyle='rgba(255,255,255,.25)';ctx.fillRect(x,y,Math.max(0,w*pct),1);}
+
+function drawHUD(){
+  ctx.font='8px "Press Start 2P"';const hpW=84;
+  bar(10,12,hpW,8,player.hp/player.maxhp,C.blood);
+  ctx.fillStyle=C.bone;ctx.fillText('HP',10,9);
+  ctx.font='6px "Press Start 2P"';ctx.fillText(Math.ceil(player.hp)+'/'+player.maxhp,10+hpW+6,18);
+  // stamina or boost bar
+  if(player.boostTime>0){bar(10,24,hpW,5,player.boostTime/(player.boostMax||30000),C.boost);
+    ctx.fillStyle=C.boost;ctx.fillText('BOOST '+Math.ceil(player.boostTime/1000)+'s',10+hpW+6,29);}
+  else{bar(10,24,hpW,5,player.stam/player.maxstam,player.sprinting?'#9be3b0':C.stam);
+    ctx.fillStyle=C.stam;ctx.fillText('STA',10+hpW+6,29);}
+  if(player.maxarmor>0){bar(10,33,hpW,5,player.armor/player.maxarmor,C.steel);
+    ctx.fillStyle=C.steel;ctx.fillText('ARM',10+hpW+6,38);}
+  if(player.swimming){ctx.fillStyle=C.waterLite;ctx.font='7px "Press Start 2P"';ctx.fillText('~ swimming ~',10,52);}
+  else if(player.lavaTick>0){ctx.fillStyle=C.lava;ctx.font='7px "Press Start 2P"';ctx.fillText('!! BURNING !!',10,52);}
+  else if(player.cactusTick>0){ctx.fillStyle=C.cactusLite;ctx.font='7px "Press Start 2P"';ctx.fillText('* ouch! spikes *',10,52);}
+  ctx.font='7px "Press Start 2P"';
+  const wn=WEAPONS[player.weaponKey];ctx.fillStyle=wn.color;
+  ctx.fillText('weapon: '+wn.name+(wn.ranged?'  ['+player.arrows+' arrows]':''),10,VIEW_H-12);
+  ctx.fillStyle=C.gold;ctx.fillText('GOLD '+player.gold,10,VIEW_H-2);
+  const freed=bosses.filter(b=>!b.alive).length;ctx.fillStyle=C.gold;ctx.fillText('WARDENS '+freed+'/4',VIEW_W-110,VIEW_H-2);
+  ctx.fillStyle='#9b94a8';ctx.font='6px "Press Start 2P"';ctx.fillText('O map  Q quests  I bag  R pin',VIEW_W-178,VIEW_H-12);
+}
+
+const MM=92,MM_PAD=8;
+function biomeColor(t){if(t===16)return'#8d8478';
+  if(t===2)return C.water;if(t===9)return C.ice;if(t===4)return C.stoneDk;
+  if(t===3)return C.sand;if(t===5)return C.path;if(t===1)return C.tree;
+  if(t===7||t===8)return C.snow;if(t===10||t===11)return C.dune;
+  if(t===12)return C.lava;if(t===13||t===15)return C.rock;if(t===14)return C.ash;return C.grass2;}
+function drawMinimap(){
+  const ox=VIEW_W-MM-MM_PAD,oy=MM_PAD,mmH=MM*MAP_H/MAP_W;
+  ctx.fillStyle='#000';ctx.fillRect(ox-2,oy-2,MM+4,mmH+4);
+  const sx=MM/MAP_W,sy=mmH/MAP_H,stepX=Math.ceil(MAP_W/MM),stepY=Math.ceil(MAP_H/mmH);
+  for(let y=0;y<MAP_H;y+=stepY)for(let x=0;x<MAP_W;x+=stepX){ctx.fillStyle=biomeColor(map[y][x]);
+    ctx.fillRect(ox+x*sx,oy+y*sy,sx*stepX+0.6,sy*stepY+0.6);}
+  // shop marker (gold square w/ outline) at centre
+  ctx.fillStyle=C.gold;ctx.fillRect(ox+SHOP.x*sx-2,oy+SHOP.y*sy-2,4,4);ctx.strokeStyle='#000';ctx.lineWidth=1;ctx.strokeRect(ox+SHOP.x*sx-2,oy+SHOP.y*sy-2,4,4);
+  bosses.forEach(b=>{if(!b.alive)return;ctx.fillStyle=C.blood;ctx.fillRect(ox+(b.px/TILE)*sx-1,oy+(b.py/TILE)*sy-1,3,3);});
+  if(marker){ctx.fillStyle='#fff';ctx.fillRect(ox+marker.tx*sx-1,oy+marker.ty*sy-1,3,3);}
+  if(Math.floor(Date.now()/250)%2){ctx.fillStyle=C.bone;ctx.fillRect(ox+(player.x/TILE)*sx-1,oy+(player.y/TILE)*sy-1,3,3);}
+  ctx.strokeStyle=C.gold;ctx.lineWidth=1;ctx.strokeRect(ox-2,oy-2,MM+3,mmH+3);
+}
+
+// ---- inventory ----
+function drawInventory(){
+  ctx.fillStyle='rgba(8,7,13,.92)';ctx.fillRect(0,0,VIEW_W,VIEW_H);
+  ctx.fillStyle=C.gold;ctx.font='12px "Press Start 2P"';ctx.fillText('INVENTORY',VIEW_W/2-66,30);
+  ctx.font='7px "Press Start 2P"';ctx.fillStyle='#9b94a8';ctx.fillText('arrows move  ·  ENTER equip/use  ·  I close',VIEW_W/2-130,46);
+  const cols=8,rows=3,cell=34,gx=(VIEW_W-cols*cell)/2,gy=56;
+  for(let i=0;i<cols*rows;i++){
+    const cxp=gx+(i%cols)*cell,cyp=gy+Math.floor(i/cols)*cell,it=player.inv[i];
+    ctx.fillStyle=(i===invSel)?C.gold:'#2a2438';ctx.fillRect(cxp,cyp,cell-3,cell-3);
+    ctx.fillStyle='#1a1626';ctx.fillRect(cxp+2,cyp+2,cell-7,cell-7);
+    if(it)drawItemIcon(it,cxp+5,cyp+5,cell-13);
+    const eqW=(it&&it.kind==='weapon'&&it.key===player.weaponKey),eqA=(it&&it.kind==='armor'&&it.key===player.equippedArmor);
+    if(eqW||eqA){ctx.strokeStyle=C.grassLite;ctx.lineWidth=2;ctx.strokeRect(cxp+1,cyp+1,cell-5,cell-5);}
+    if(it&&((it.kind==='weapon'&&WEAPONS[it.key].relic)||(it.kind==='armor'&&ARMORS[it.key].relic))){ctx.fillStyle=C.gold;ctx.fillRect(cxp+cell-8,cyp+2,3,3);}
+    if(it&&it.count&&it.count>1){ctx.fillStyle=C.bone;ctx.font='7px "Press Start 2P"';ctx.fillText(it.count,cxp+cell-12,cyp+cell-7);}
+  }
+  const sel=player.inv[invSel],py=gy+rows*cell+12;
+  ctx.fillStyle='#1a1626';ctx.fillRect(gx,py,cols*cell-3,52);ctx.strokeStyle='#3a3450';ctx.strokeRect(gx,py,cols*cell-3,52);
+  ctx.font='8px "Press Start 2P"';
+  if(sel){
+    if(sel.kind==='weapon'){const w=WEAPONS[sel.key];ctx.fillStyle=w.color;ctx.fillText(w.name+(w.relic?' ★':''),gx+12,py+16);
+      ctx.fillStyle=C.bone;ctx.font='7px "Press Start 2P"';let l='Damage '+w.dmg+(w.ranged?'   RANGED':'   Reach '+w.range);if(w.burn)l+='  +BURN';if(w.freeze)l+='  +FROST';ctx.fillText(l,gx+12,py+30);
+      ctx.fillStyle=(sel.key===player.weaponKey)?C.grassLite:C.gold;ctx.fillText(sel.key===player.weaponKey?'EQUIPPED':'press ENTER to equip',gx+12,py+44);}
+    else if(sel.kind==='armor'){const a=ARMORS[sel.key];ctx.fillStyle=a.color;ctx.fillText(a.name+(a.relic?' ★':''),gx+12,py+16);
+      ctx.fillStyle=C.bone;ctx.font='7px "Press Start 2P"';ctx.fillText('Armor +'+a.val,gx+12,py+30);
+      ctx.fillStyle=(sel.key===player.equippedArmor)?C.grassLite:C.gold;ctx.fillText(sel.key===player.equippedArmor?'EQUIPPED':'press ENTER to equip',gx+12,py+44);}
+    else if(sel.kind==='potion'){ctx.fillStyle=C.blood;ctx.fillText('Health Potion',gx+12,py+16);
+      ctx.fillStyle=C.bone;ctx.font='7px "Press Start 2P"';ctx.fillText('Restores +'+(sel.val||50)+' HP',gx+12,py+30);
+      ctx.fillStyle=C.gold;ctx.fillText('press ENTER to drink',gx+12,py+44);}
+    else if(sel.kind==='boost'){ctx.fillStyle=C.boost;ctx.fillText('Boost Potion',gx+12,py+16);
+      ctx.fillStyle=C.bone;ctx.font='7px "Press Start 2P"';ctx.fillText('30s infinite sprint',gx+12,py+30);
+      ctx.fillStyle=C.gold;ctx.fillText('press ENTER to drink',gx+12,py+44);}
+    else{ctx.fillStyle=C.gold;ctx.fillText('Gold Pouch',gx+12,py+16);}
+  } else {ctx.fillStyle='#6b6478';ctx.fillText('empty slot',gx+12,py+26);}
+}
+function drawItemIcon(it,x,y,s){
+  if(it.kind==='weapon'){const w=WEAPONS[it.key];ctx.fillStyle=w.color;
+    if(w.icon==='fist')ctx.fillRect(x+s/2-3,y+s/2-3,7,7);
+    else if(w.icon==='bow'){ctx.strokeStyle=w.color;ctx.lineWidth=2;ctx.beginPath();ctx.arc(x+s/2+2,y+s/2,s/2-1,-1.2,1.2);ctx.stroke();
+      ctx.strokeStyle=C.bone;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x+s/2-2,y+2);ctx.lineTo(x+s/2-2,y+s-2);ctx.stroke();}
+    else if(w.icon==='spear'){ctx.fillRect(x+s/2-1,y+2,2,s-4);ctx.fillRect(x+s/2-3,y+2,6,4);}
+    else if(w.icon==='axe'){ctx.fillRect(x+s/2-1,y+3,2,s-5);ctx.fillRect(x+s/2,y+3,6,7);}
+    else{ctx.fillRect(x+s/2-1,y+2,2,s-7);ctx.fillStyle=C.wood;ctx.fillRect(x+s/2-3,y+s-7,6,2);ctx.fillRect(x+s/2-1,y+s-5,2,3);}}
+  else if(it.kind==='armor'){const a=ARMORS[it.key];ctx.fillStyle=a.color;ctx.fillRect(x+2,y+3,s-4,s-6);ctx.fillStyle='#00000040';ctx.fillRect(x+s/2-1,y+3,2,s-6);}
+  else if(it.kind==='potion'){ctx.fillStyle=C.blood;ctx.fillRect(x+s/2-3,y+4,6,s-6);ctx.fillStyle='#fff';ctx.fillRect(x+s/2-1,y+2,2,3);}
+  else if(it.kind==='boost'){ctx.fillStyle=C.boost;ctx.fillRect(x+s/2-3,y+4,6,s-6);ctx.fillStyle='#fff';ctx.fillRect(x+s/2-1,y+2,2,3);ctx.fillStyle='#fff8';ctx.fillRect(x+s/2-2,y+6,1,s-9);}
+  else if(it.kind==='gold'){ctx.fillStyle=C.gold;ctx.beginPath();ctx.arc(x+s/2,y+s/2,s/3,0,7);ctx.fill();}
+}
+
+function drawQuests(){
+  ctx.fillStyle='rgba(8,7,13,.92)';ctx.fillRect(0,0,VIEW_W,VIEW_H);
+  ctx.fillStyle=C.gold;ctx.font='12px "Press Start 2P"';ctx.fillText('QUEST LOG',VIEW_W/2-60,34);
+  let yy=64;
+  quests.forEach(q=>{const cur=Math.min(q.done(),q.goal),pct=cur/q.goal,complete=cur>=q.goal;
+    ctx.fillStyle=complete?C.grassLite:C.bone;ctx.font='8px "Press Start 2P"';ctx.fillText((complete?'✓ ':'• ')+q.title,40,yy);
+    ctx.fillStyle='#9b94a8';ctx.font='7px "Press Start 2P"';ctx.fillText(q.desc,52,yy+14);
+    bar(52,yy+20,VIEW_W-160,5,pct,complete?C.grassLite:C.gold);
+    ctx.fillStyle=C.bone;ctx.font='6px "Press Start 2P"';ctx.fillText(cur+'/'+q.goal,VIEW_W-100,yy+25);
+    ctx.fillStyle='#6b6478';ctx.fillText('reward: '+q.reward,52,yy+36);yy+=52;});
+  ctx.fillStyle='#9b94a8';ctx.font='7px "Press Start 2P"';ctx.fillText('press Q to close',VIEW_W/2-58,VIEW_H-16);
+}
+
+// ---- shop UI (buy/sell) ----
+let shopBtns=[]; // clickable rects rebuilt each frame
+function drawShop_UI(){
+  shopBtns=[];
+  ctx.fillStyle='rgba(8,7,13,.94)';ctx.fillRect(0,0,VIEW_W,VIEW_H);
+  ctx.fillStyle=C.gold;ctx.font='12px "Press Start 2P"';ctx.fillText('THE MARKET',VIEW_W/2-72,28);
+  ctx.fillStyle=C.gold;ctx.font='8px "Press Start 2P"';ctx.fillText('GOLD: '+player.gold,VIEW_W-120,28);
+  // tabs
+  const tabW=90,ty=40;
+  drawTab(VIEW_W/2-tabW-4,ty,tabW,'BUY',shopTab==='buy','buy');
+  drawTab(VIEW_W/2+4,ty,tabW,'SELL',shopTab==='sell','sell');
+  const listX=40,listY=64,rowH=26,listW=VIEW_W-80;
+  if(shopTab==='buy'){
+    SHOP_BUY.forEach((e,i)=>{
+      const ry=listY+i*rowH,sel=i===shopSel;
+      ctx.fillStyle=sel?'#3a3450':'#1c1830';ctx.fillRect(listX,ry,listW,rowH-4);
+      if(sel){ctx.strokeStyle=C.gold;ctx.lineWidth=1;ctx.strokeRect(listX,ry,listW,rowH-4);}
+      // icon
+      drawShopIcon(e,listX+6,ry+4);
+      ctx.fillStyle=C.bone;ctx.font='8px "Press Start 2P"';ctx.fillText(e.name,listX+30,ry+11);
+      ctx.fillStyle='#9b94a8';ctx.font='6px "Press Start 2P"';ctx.fillText(e.desc,listX+30,ry+20);
+      const afford=player.gold>=e.cost;ctx.fillStyle=afford?C.gold:'#7a4a4a';ctx.font='8px "Press Start 2P"';
+      ctx.fillText(e.cost+'g',listX+listW-46,ry+15);
+      // buy button
+      const bw=34,bh=14,bxp=listX+listW-bw-4,byp=ry+3;
+      ctx.fillStyle=afford?C.grass:'#3a3038';ctx.fillRect(bxp,byp,bw,bh);
+      ctx.fillStyle=afford?C.bone:'#6b6478';ctx.font='6px "Press Start 2P"';ctx.fillText('BUY',bxp+8,byp+9);
+      shopBtns.push({x:bxp,y:byp,w:bw,h:bh,act:'buy',i});
+      shopBtns.push({x:listX,y:ry,w:listW-bw-8,h:rowH-4,act:'selbuy',i});
+    });
+  } else {
+    // SELL: show inventory items with sell value
+    let shown=0;
+    for(let i=0;i<player.inv.length;i++){
+      const it=player.inv[i];if(!it)continue;
+      const v=sellValue(it);
+      const ry=listY+shown*rowH,sel=i===shopSel;
+      ctx.fillStyle=sel?'#3a3450':'#1c1830';ctx.fillRect(listX,ry,listW,rowH-4);
+      if(sel){ctx.strokeStyle=C.gold;ctx.lineWidth=1;ctx.strokeRect(listX,ry,listW,rowH-4);}
+      drawItemIcon(it,listX+6,ry+5,16);
+      ctx.fillStyle=C.bone;ctx.font='8px "Press Start 2P"';ctx.fillText(itemName(it)+(it.count>1?' x'+it.count:''),listX+30,ry+13);
+      const eq=(it.kind==='weapon'&&it.key===player.weaponKey)||(it.kind==='armor'&&it.key===player.equippedArmor)||(it.kind==='weapon'&&it.key==='fists');
+      ctx.fillStyle=eq?'#7a4a4a':C.gold;ctx.font='8px "Press Start 2P"';
+      ctx.fillText(eq?'—':('+'+v+'g'),listX+listW-50,ry+15);
+      const bw=34,bh=14,bxp=listX+listW-bw-4,byp=ry+3;
+      ctx.fillStyle=(eq||v<=0)?'#3a3038':C.blood;ctx.fillRect(bxp,byp,bw,bh);
+      ctx.fillStyle=(eq||v<=0)?'#6b6478':C.bone;ctx.font='6px "Press Start 2P"';ctx.fillText('SELL',bxp+5,byp+9);
+      if(!eq&&v>0)shopBtns.push({x:bxp,y:byp,w:bw,h:bh,act:'sell',i});
+      shopBtns.push({x:listX,y:ry,w:listW-bw-8,h:rowH-4,act:'selsell',i});
+      shown++;
+      if(shown>=8)break;
+    }
+    if(shown===0){ctx.fillStyle='#6b6478';ctx.font='8px "Press Start 2P"';ctx.fillText('Nothing to sell',listX+20,listY+20);}
+  }
+  ctx.fillStyle='#9b94a8';ctx.font='6px "Press Start 2P"';
+  ctx.fillText('arrows/click select · ENTER/click button · A/D switch tab · E exit',24,VIEW_H-12);
+}
+function drawTab(x,y,w,label,active,tab){
+  ctx.fillStyle=active?C.gold:'#2a2438';ctx.fillRect(x,y,w,16);
+  ctx.fillStyle=active?'#1a1626':C.bone;ctx.font='8px "Press Start 2P"';ctx.fillText(label,x+w/2-16,y+11);
+  shopBtns.push({x,y,w,h:16,act:'tab',tab});
+}
+function drawShopIcon(e,x,y){
+  if(e.kind==='potion'){ctx.fillStyle=C.blood;ctx.fillRect(x+4,y+3,8,12);ctx.fillStyle='#fff';ctx.fillRect(x+6,y,4,3);}
+  else if(e.kind==='boost'){ctx.fillStyle=C.boost;ctx.fillRect(x+4,y+3,8,12);ctx.fillStyle='#fff';ctx.fillRect(x+6,y,4,3);ctx.fillStyle='#fff9';ctx.fillRect(x+6,y+5,1,8);}
+  else if(e.kind==='armor'){ctx.fillStyle=ARMORS[e.akey].color;ctx.fillRect(x+2,y+3,14,12);ctx.fillStyle='#0004';ctx.fillRect(x+8,y+3,2,12);}
+  else if(e.kind==='ammo'){ctx.strokeStyle=C.arrow;ctx.lineWidth=1;
+    for(let i=0;i<3;i++){const ax=x+4+i*4;ctx.beginPath();ctx.moveTo(ax,y+2);ctx.lineTo(ax,y+15);ctx.stroke();
+      ctx.fillStyle=C.bone;ctx.fillRect(ax-1,y+1,3,2);ctx.fillStyle=C.arrow;ctx.fillRect(ax-1,y+13,3,2);}}
+  else if(e.kind==='info'){ctx.strokeStyle=WEAPONS[e.wkey].color;ctx.lineWidth=2;ctx.beginPath();ctx.arc(x+10,y+8,7,-1.2,1.2);ctx.stroke();
+    ctx.strokeStyle=C.bone;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x+6,y+1);ctx.lineTo(x+6,y+15);ctx.stroke();}
+}
+function handleShopClick(mx,my){
+  // find topmost button hit
+  for(let i=shopBtns.length-1;i>=0;i--){const b=shopBtns[i];
+    if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){
+      if(b.act==='tab'){shopTab=b.tab;shopSel=0;Audio2.ui();return;}
+      if(b.act==='buy'){buyItem(SHOP_BUY[b.i]);return;}
+      if(b.act==='sell'){sellSlot(b.i);return;}
+      if(b.act==='selbuy'){shopSel=b.i;Audio2.ui();return;}
+      if(b.act==='selsell'){shopSel=b.i;Audio2.ui();return;}
+    }
+  }
+}
+
+// ---- forge / merging station popup ----
+function drawForge_UI(){
+  forgeBtns=[];
+  // panel
+  const pw=380,ph=216,px=(VIEW_W-pw)/2,py=(VIEW_H-ph)/2;
+  ctx.fillStyle='rgba(8,7,13,.94)';ctx.fillRect(0,0,VIEW_W,VIEW_H);
+  ctx.fillStyle='#15121f';ctx.fillRect(px,py,pw,ph);
+  ctx.strokeStyle=C.gold;ctx.lineWidth=2;ctx.strokeRect(px,py,pw,ph);
+  // title
+  ctx.fillStyle=C.gold;ctx.font='12px "Press Start 2P"';ctx.fillText('THE FORGE',px+pw/2-58,py+22);
+  ctx.fillStyle='#9b94a8';ctx.font='6px "Press Start 2P"';
+  ctx.fillText('merge all four Warden Swords into Excalibur',px+pw/2-118,py+36);
+
+  const forged=hasPart('excalibur')||player.weaponKey==='excalibur';
+  // four part slots
+  const slotY=py+48,cell=44,gap=10,totalW=4*cell+3*gap,startX=px+(pw-totalW)/2;
+  EXCALIBUR_PARTS.forEach((key,i)=>{
+    const w=WEAPONS[key];const has=hasPart(key)||forged;
+    const cx=startX+i*(cell+gap),cy=slotY;
+    ctx.fillStyle=has?'#23304a':'#241c2c';ctx.fillRect(cx,cy,cell,cell);
+    ctx.strokeStyle=has?C.grassLite:'#3a3450';ctx.lineWidth=2;ctx.strokeRect(cx,cy,cell,cell);
+    // sword icon
+    if(has)drawItemIcon({kind:'weapon',key},cx+13,cy+9,20);
+    else{ctx.fillStyle='#3a3450';ctx.font='16px "Press Start 2P"';ctx.fillText('?',cx+cell/2-5,cy+cell/2+6);}
+    // tiny effect tag
+    const eff=w.burn?'BURN':w.slow?'SLOW':w.shock?'SHOCK':w.venom?'VENOM':'';
+    ctx.fillStyle=has?w.color:'#555';ctx.font='5px "Press Start 2P"';
+    ctx.fillText(eff,cx+cell/2-eff.length*2.5,cy+cell-4);
+    // check / cross
+    ctx.fillStyle=has?C.grassLite:'#7a4a4a';ctx.font='8px "Press Start 2P"';
+    ctx.fillText(has?'✓':'✗',cx+cell-9,cy+10);
+  });
+
+  // plus signs between slots
+  ctx.fillStyle=C.gold;ctx.font='10px "Press Start 2P"';
+  for(let i=0;i<3;i++)ctx.fillText('+',startX+cell+gap/2-3+i*(cell+gap),slotY+cell/2+4);
+
+  // result line
+  const ry=slotY+cell+22;
+  ctx.fillStyle=forged?C.grassLite:'#9b94a8';ctx.font='7px "Press Start 2P"';
+  if(forged){ctx.fillText('Excalibur has been forged. It is yours.',px+pw/2-130,ry);}
+  else{const have=partsCollected();
+    ctx.fillText('Swords gathered: '+have+'/4',px+pw/2-66,ry);}
+  ctx.fillStyle='#fff1a8';ctx.font='7px "Press Start 2P"';
+  ctx.fillText('= EXCALIBUR  (100 dmg · burn · slow · shock · venom)',px+pw/2-176,ry+16);
+
+  // FORGE button
+  const can=!forged&&partsCollected()>=4;
+  const bw=130,bh=22,bx=px+pw/2-bw-6,by2=py+ph-34;
+  ctx.fillStyle=can?C.blood:'#3a3038';ctx.fillRect(bx,by2,bw,bh);
+  ctx.strokeStyle=can?C.gold:'#4a4452';ctx.lineWidth=1;ctx.strokeRect(bx,by2,bw,bh);
+  ctx.fillStyle=can?C.bone:'#6b6478';ctx.font='8px "Press Start 2P"';
+  ctx.fillText(forged?'FORGED':'FORGE',bx+bw/2-(forged?24:20),by2+14);
+  if(can)forgeBtns.push({x:bx,y:by2,w:bw,h:bh,act:'forge'});
+
+  // CLOSE button — always works so you can walk away
+  const cbw=130,cbx=px+pw/2+6,cby=by2;
+  ctx.fillStyle='#2a2438';ctx.fillRect(cbx,cby,cbw,bh);
+  ctx.strokeStyle='#4a4262';ctx.strokeRect(cbx,cby,cbw,bh);
+  ctx.fillStyle=C.bone;ctx.font='8px "Press Start 2P"';ctx.fillText('CLOSE  (E)',cbx+cbw/2-40,cby+14);
+  forgeBtns.push({x:cbx,y:cby,w:cbw,h:bh,act:'close'});
+}
+
+// ---- full screen world map (click marker toggles) ----
+let mapView={ox:0,oy:0,scale:1};
+function computeMapView(){const pad=18,availW=VIEW_W-pad*2,availH=VIEW_H-pad*2-30;
+  const scale=Math.min(availW/MAP_W,availH/MAP_H);const ox=(VIEW_W-MAP_W*scale)/2,oy=20+(availH-MAP_H*scale)/2;mapView={ox,oy,scale};return mapView;}
+function clickWorldMap(sx,sy){
+  const{ox,oy,scale}=computeMapView();const tx=(sx-ox)/scale,ty=(sy-oy)/scale;
+  if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return;
+  // if clicking near existing marker -> remove it (toggle off)
+  if(marker){const mdx=(marker.tx-tx)*scale,mdy=(marker.ty-ty)*scale;
+    if(Math.hypot(mdx,mdy)<10){marker=null;Audio2.ui();toast('Marker removed');return;}}
+  marker={tx,ty};Audio2.ui();toast('Marker set — follow the dotted trail');
+}
+function compassDir(dx,dy){const ang=(Math.atan2(dy,dx)*180/Math.PI+360)%360;return['E','SE','S','SW','W','NW','N','NE'][Math.round(ang/45)%8];}
+function arrowFor(dir){return{N:'↑',NE:'↗',E:'→',SE:'↘',S:'↓',SW:'↙',W:'←',NW:'↖'}[dir]||'';}
+function drawWorldMap(){
+  ctx.fillStyle='rgba(6,5,10,.96)';ctx.fillRect(0,0,VIEW_W,VIEW_H);
+  ctx.fillStyle=C.gold;ctx.font='10px "Press Start 2P"';ctx.fillText('WORLD MAP',12,14);
+  ctx.fillStyle='#9b94a8';ctx.font='6px "Press Start 2P"';ctx.fillText('click to set/remove marker · O closes',VIEW_W-236,14);
+  const{ox,oy,scale}=computeMapView();const step=Math.max(1,Math.floor(MAP_W/240));
+  for(let y=0;y<MAP_H;y+=step)for(let x=0;x<MAP_W;x+=step){ctx.fillStyle=biomeColor(map[y][x]);ctx.fillRect(ox+x*scale,oy+y*scale,scale*step+0.6,scale*step+0.6);}
+  ctx.strokeStyle='#3a3450';ctx.lineWidth=1;ctx.strokeRect(ox,oy,MAP_W*scale,MAP_H*scale);
+  ctx.fillStyle=C.lava;ctx.fillRect(ox+VOLCANO.x*scale-2,oy+VOLCANO.y*scale-2,4,4);
+  // shop icon w/ label
+  const shx=ox+SHOP.x*scale,shy=oy+SHOP.y*scale;
+  ctx.fillStyle=C.gold;ctx.fillRect(shx-3,shy-3,6,6);ctx.fillStyle='#000';ctx.fillRect(shx-1,shy-1,2,2);
+  ctx.fillStyle=C.gold;ctx.font='6px "Press Start 2P"';ctx.fillText('SHOP',shx-10,shy-6);
+  bosses.forEach(b=>{if(!b.alive)return;ctx.fillStyle=C.blood;ctx.fillRect(ox+(b.px/TILE)*scale-2,oy+(b.py/TILE)*scale-2,4,4);});
+  chests.forEach(c=>{if(c.opened)return;const tint=(BIOME_LOOT[c.biome]&&BIOME_LOOT[c.biome].tint)||C.gold;ctx.fillStyle=tint;ctx.fillRect(ox+c.x*scale-1,oy+c.y*scale-1,2,2);});
+  const ptx=player.x/TILE,pty=player.y/TILE,px=ox+ptx*scale,py=oy+pty*scale;
+  ctx.fillStyle=C.bone;ctx.fillRect(px-2,py-2,4,4);ctx.strokeStyle=C.grassLite;ctx.strokeRect(px-3,py-3,6,6);
+  if(marker){const mx=ox+marker.tx*scale,my=oy+marker.ty*scale;
+    ctx.strokeStyle='rgba(255,255,255,.4)';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(mx,my);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle='#fff';ctx.fillRect(mx-1,my-6,2,6);ctx.fillStyle=C.blood;ctx.beginPath();ctx.arc(mx,my-7,3,0,7);ctx.fill();
+    const dtx=marker.tx-ptx,dty=marker.ty-pty,meters=Math.round(Math.hypot(dtx,dty)*METERS_PER_TILE),dir=compassDir(dtx,dty);
+    const panelY=VIEW_H-22;ctx.fillStyle='rgba(13,11,20,.9)';ctx.fillRect(8,panelY-8,VIEW_W-16,20);ctx.strokeStyle=C.gold;ctx.strokeRect(8,panelY-8,VIEW_W-16,20);
+    ctx.fillStyle=C.gold;ctx.font='8px "Press Start 2P"';ctx.fillText('MARKER:  '+meters+' m  '+dir+'  '+arrowFor(dir)+'   (click pin to remove)',16,panelY+5);
+  } else {const panelY=VIEW_H-22;ctx.fillStyle='rgba(13,11,20,.9)';ctx.fillRect(8,panelY-8,VIEW_W-16,20);ctx.strokeStyle='#3a3450';ctx.strokeRect(8,panelY-8,VIEW_W-16,20);
+    ctx.fillStyle='#9b94a8';ctx.font='7px "Press Start 2P"';ctx.fillText('click anywhere to drop a marker — a dotted trail will guide you',16,panelY+5);}
+}
+
+// ============================================================
+// Scale the whole game frame up to fill the window (keeps the crisp
+// 480x320 internal resolution; just displays it larger).
+const frameEl=document.getElementById('frame');
+function fitToScreen(){
+  // leave a little breathing room so the bezel/shadow isn't clipped
+  const margin=24;
+  const availW=window.innerWidth-margin, availH=window.innerHeight-margin;
+  const scale=Math.max(1,Math.min(availW/VIEW_W, availH/VIEW_H));
+  frameEl.style.transform='scale('+scale+')';
+}
+window.addEventListener('resize',fitToScreen);
+fitToScreen();
+
+function loop(now){const dt=Math.min(50,now-lastTime);lastTime=now;update(dt);draw();requestAnimationFrame(loop);}
+genWorld();genChests();genMobs();genQuests();relocateBosses();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
