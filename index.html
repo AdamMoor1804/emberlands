@@ -214,6 +214,28 @@ function isLava(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return false;return m
 function isCactus(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return false;return map[ty][tx]===11;}
 // enemies may never enter water OR lava OR solid
 function enemyBlocked(tx,ty){return solid(tx,ty)||isWater(tx,ty)||isLava(tx,ty);}
+// the unbreakable outer border (and out-of-bounds) — Warden attacks can't clear this
+function isBorder(tx,ty){return tx<2||ty<2||tx>=MAP_W-2||ty>=MAP_H-2;}
+// Wardens CAN walk on water (at half speed); they're only blocked by solids/lava and the border.
+function bossBlocked(tx,ty){if(isBorder(tx,ty))return true;return solid(tx,ty)||isLava(tx,ty);}
+// is this tile a breakable obstacle (anything blocking that isn't the protected border)?
+const BREAKABLE=new Set([1,4,8,11,13,15]); // trees,mountains,pines,cactus,volrock,peak
+function bossBreakTiles(bcx,bcy,radius){
+  const t0x=Math.floor((bcx-radius)/TILE),t1x=Math.floor((bcx+radius)/TILE);
+  const t0y=Math.floor((bcy-radius)/TILE),t1y=Math.floor((bcy+radius)/TILE);
+  for(let ty=t0y;ty<=t1y;ty++)for(let tx=t0x;tx<=t1x;tx++){
+    if(isBorder(tx,ty))continue;            // never break the border
+    if(inShopBuilding(tx,ty))continue;      // leave the shop alone
+    if(tx===FORGE.x&&ty===FORGE.y)continue; // leave the forge
+    if(BREAKABLE.has(map[ty][tx])){
+      const cx=tx*TILE+TILE/2,cy=ty*TILE+TILE/2;
+      if(Math.hypot(cx-bcx,cy-bcy)<=radius+TILE*0.5){
+        map[ty][tx]=0; // smash to grass
+        for(let i=0;i<4;i++)chips.push({x:cx,y:cy,vx:(Math.random()-0.5)*3,vy:-Math.random()*2.5,life:20});
+      }
+    }
+  }
+}
 
 // ============================================================
 //  ITEMS
@@ -226,6 +248,7 @@ const WEAPONS={
   axe:{name:'Warden Axe',dmg:26,range:40,swing:22,color:'#d98c4a',icon:'axe',value:28},
   blade:{name:'Ember Blade',dmg:40,range:46,swing:18,color:'#ff7a3d',icon:'blade',value:45},
   bow:{name:'Hunter Bow',dmg:18,range:0,swing:12,color:'#a9772f',icon:'bow',ranged:true,arrowSpd:6,value:18},
+  longbow:{name:'Shadowstring Bow',dmg:25,range:0,swing:11,color:'#7a4fd4',icon:'bow',ranged:true,arrowSpd:6.8,rare:true,value:55},
   warbow:{name:'Warden Longbow',dmg:34,range:0,swing:10,color:'#d9b25a',icon:'bow',ranged:true,arrowSpd:7.5,value:40},
   firesword:{name:'Fire Sword',dmg:50,range:44,swing:18,color:'#ff5a1f',icon:'blade',burn:true,relic:'volcano',value:90},
   frostfang:{name:'Frostfang Blade',dmg:46,range:44,swing:16,color:'#7fd4e0',icon:'blade',freeze:true,relic:'snow',value:85},
@@ -309,20 +332,20 @@ const bosses=[
   {name:'Warden of Ember',x:VOLCANO.x,y:VOLCANO.y+VOLCANO.r+5,color:'#7a2d1a',accent:'#ff7a3d',
     dropW:'emberblade',dropA:'emberplate',size:38,speed:1.3,reach:46}
 ];
-bosses.forEach(b=>{b.hp=2500;b.max=2500;b.dmg=30;b.alive=true;b.hit=0;b.atk=0;b.px=b.x*TILE;b.py=b.y*TILE;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;});
+bosses.forEach(b=>{b.hp=2500;b.max=2500;b.dmg=30;b.alive=true;b.hit=0;b.atk=0;b.px=b.x*TILE;b.py=b.y*TILE;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b.atkTimer=0;});
 // After the world is generated, make sure no Warden is sitting on water/lava/solid.
 // Spiral outward from its intended tile to the nearest tile a boss can actually stand on.
 function relocateBosses(){
   bosses.forEach(b=>{
     let bx=b.x,by=b.y;
-    if(!enemyBlocked(bx,by)){b.x=bx;b.y=by;b.px=bx*TILE;b.py=by*TILE;return;}
+    if(!bossBlocked(bx,by)){b.x=bx;b.y=by;b.px=bx*TILE;b.py=by*TILE;return;}
     let found=false;
     for(let r=1;r<60&&!found;r++){
       for(let dy=-r;dy<=r&&!found;dy++)for(let dx=-r;dx<=r&&!found;dx++){
         if(Math.abs(dx)!==r&&Math.abs(dy)!==r)continue; // ring only
         const tx=bx+dx,ty=by+dy;
         if(tx<2||ty<2||tx>=MAP_W-2||ty>=MAP_H-2)continue;
-        if(!enemyBlocked(tx,ty)){b.x=tx;b.y=ty;b.px=tx*TILE;b.py=ty*TILE;found=true;}
+        if(!bossBlocked(tx,ty)){b.x=tx;b.y=ty;b.px=tx*TILE;b.py=ty*TILE;found=true;}
       }
     }
   });
@@ -356,10 +379,11 @@ function rollBiomeLoot(r,biome){
   const L=BIOME_LOOT[biome]||BIOME_LOOT.grass;const roll=r();
   if(roll<0.04)return{kind:'weapon',key:L.relicW,relic:true};
   if(roll<0.07)return{kind:'armor',key:L.relicA,relic:true};
-  if(roll<0.22)return{kind:'weapon',key:L.commonW};
-  if(roll<0.37)return{kind:'armor',key:L.commonA};
-  if(roll<0.50)return{kind:'weapon',key:(r()<0.5?'bow':'sword')};
-  if(roll<0.74)return{kind:'potion',key:'heal',val:50};
+  if(roll<0.12)return{kind:'weapon',key:'longbow',relic:true};   // ~5% rare Shadowstring Bow (25 dmg)
+  if(roll<0.26)return{kind:'weapon',key:L.commonW};
+  if(roll<0.40)return{kind:'armor',key:L.commonA};
+  if(roll<0.52)return{kind:'weapon',key:(r()<0.5?'bow':'sword')};
+  if(roll<0.75)return{kind:'potion',key:'heal',val:50};
   return{kind:'gold',key:'gold',val:20+Math.floor(r()*60)};
 }
 
@@ -471,7 +495,7 @@ function resetGame(){
     weaponKey:'fists',equippedArmor:null,stam:100,maxstam:100,sprinting:false,swimming:false,
     inv:makeInv(),attacking:0,attackCD:0,hurt:0,gold:80,dir:'down',trail:[],lavaTick:0,cactusTick:0,boostTime:0,boostMax:0,arrows:0});
   for(const k in treeHP)delete treeHP[k];chips=[];
-  bosses.forEach(b=>{b.hp=b.max;b.alive=true;b.px=b.x*TILE;b.py=b.y*TILE;b.hit=0;b.atk=0;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b._dotAcc=0;});
+  bosses.forEach(b=>{b.hp=b.max;b.alive=true;b.px=b.x*TILE;b.py=b.y*TILE;b.hit=0;b.atk=0;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b._dotAcc=0;b.atkTimer=0;});
   wispKills=0;relicsFound=0;for(const k in questClaimed)delete questClaimed[k];marker=null;shopOpen=false;forgeOpen=false;genQuests();
   GAME='play';Audio2.startMusic();
 }
@@ -733,21 +757,31 @@ function update(dt){
 
   bosses.forEach(b=>{if(!b.alive)return;
     tickEffects(b,dt);
-    const slowF=(b.slowT>0)?0.45:1;
     const bx=b.px+b.size/2,by=b.py+b.size/2,pcx=player.x+8,pcy=player.y+9,dist=Math.hypot(pcx-bx,pcy-by);
+    // water slows Wardens to half speed (they can still cross it now)
+    const onWater=isWater(Math.floor(bx/TILE),Math.floor(by/TILE));
+    const slowF=((b.slowT>0)?0.45:1)*(onWater?0.5:1);
     if(b.shockT>0){b.shockT--;}
-    else if(dist>b.size/2+b.reach-6&&dist<1400){
+    else if(dist>b.size/2+b.reach-6&&dist<2000){
       const a=Math.atan2(pcy-by,pcx-bx);let sp=b.speed*(b.lunge>0?1.8:1)*slowF;
       const ox=Math.cos(a)*sp,oy=Math.sin(a)*sp;
-      // bosses blocked by water/lava/solid; slide along blocked axis
-      if(!enemyBlocked(Math.floor((bx+ox)/TILE),Math.floor(by/TILE)))b.px+=ox;
-      else if(!enemyBlocked(Math.floor(bx/TILE),Math.floor((by+Math.sign(oy||1)*sp)/TILE)))b.py+=Math.sign(oy||1)*sp;
-      if(!enemyBlocked(Math.floor(bx/TILE),Math.floor((by+oy)/TILE)))b.py+=oy;
-      else if(!enemyBlocked(Math.floor((bx+Math.sign(ox||1)*sp)/TILE),Math.floor(by/TILE)))b.px+=Math.sign(ox||1)*sp;
+      // bosses blocked only by solids/lava/border (water is walkable); slide along blocked axis
+      if(!bossBlocked(Math.floor((bx+ox)/TILE),Math.floor(by/TILE)))b.px+=ox;
+      else if(!bossBlocked(Math.floor(bx/TILE),Math.floor((by+Math.sign(oy||1)*sp)/TILE)))b.py+=Math.sign(oy||1)*sp;
+      if(!bossBlocked(Math.floor(bx/TILE),Math.floor((by+oy)/TILE)))b.py+=oy;
+      else if(!bossBlocked(Math.floor((bx+Math.sign(ox||1)*sp)/TILE),Math.floor(by/TILE)))b.px+=Math.sign(ox||1)*sp;
     }
     if(b.lunge>0)b.lunge--;
-    if(dist<b.size/2+b.reach&&b.shockT<=0){b.atk++;if(b.atk>26){b.atk=0;b.lunge=10;damagePlayer(b.dmg);}}
-    else if(b.atk>0)b.atk--;
+    // ---- AUTO-ATTACK every 0.8s, regardless of player position ----
+    b.atkTimer=(b.atkTimer||0)+dt;
+    b.atk=Math.max(0,(b.atkTimer/800)*30); // drives the wind-up ring visual (0..30)
+    if(b.atkTimer>=800){
+      b.atkTimer-=800;b.lunge=10;
+      // the swing smashes every breakable block around the Warden so it can never wall itself in
+      bossBreakTiles(bx,by,b.reach+TILE);
+      // only hurts the player if they're within reach
+      if(dist<b.size/2+b.reach)damagePlayer(b.dmg);
+    }
     if(b.hit>0)b.hit--;
     if(b.hp<=0){b.alive=false;Audio2.bossDown();invAdd('weapon',b.dropW);invAdd('armor',b.dropA);
       toast(b.name+' falls!  Dropped '+WEAPONS[b.dropW].name+' + '+ARMORS[b.dropA].name+' — equip in bag (I)');
