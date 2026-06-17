@@ -686,7 +686,7 @@ function damagePlayer(d){if(player.hurt>0)return;let rem=d;
   if(player.armor>0){const absorb=Math.min(player.armor,Math.ceil(d*0.6));player.armor-=absorb;rem-=absorb;}
   player.hp-=rem;player.hurt=24;Audio2.hurt();if(player.hp<=0)killPlayer();}
 function tickDamage(d,snd){player.hp-=d;if(snd)snd();if(player.hp<=0)killPlayer();}
-function killPlayer(){player.hp=0;GAME='dead';
+function killPlayer(){player.hp=0;GAME='dead';clearSave();
   document.getElementById('deathline').textContent=bosses.filter(b=>!b.alive).length+' of 4 Wardens freed before you fell.';
   document.getElementById('death').classList.remove('hidden');}
 
@@ -785,7 +785,7 @@ function update(dt){
     if(b.hit>0)b.hit--;
     if(b.hp<=0){b.alive=false;Audio2.bossDown();invAdd('weapon',b.dropW);invAdd('armor',b.dropA);
       toast(b.name+' falls!  Dropped '+WEAPONS[b.dropW].name+' + '+ARMORS[b.dropA].name+' — equip in bag (I)');
-      if(bosses.every(x=>!x.alive)){GAME='win';document.getElementById('win').classList.remove('hidden');Audio2.win();}}});
+      if(bosses.every(x=>!x.alive)){GAME='win';clearSave();document.getElementById('win').classList.remove('hidden');Audio2.win();}}});
   checkQuests();
 }
 // decay status timers and apply damage-over-time
@@ -1404,6 +1404,76 @@ function drawWorldMap(){
 }
 
 // ============================================================
+//  SAVE / LOAD  (persists to localStorage across tab close/reopen)
+// ============================================================
+const SAVE_KEY='emberlands_save_v1';
+function saveGame(){
+  if(GAME!=='play')return; // only snapshot active games
+  try{
+    const data={
+      v:1,
+      player:{
+        x:player.x,y:player.y,hp:player.hp,maxhp:player.maxhp,armor:player.armor,maxarmor:player.maxarmor,
+        weaponKey:player.weaponKey,equippedArmor:player.equippedArmor,gold:player.gold,arrows:player.arrows,
+        dir:player.dir,boostTime:player.boostTime,boostMax:player.boostMax,
+        inv:player.inv // array of slot objects (or null)
+      },
+      bosses:bosses.map(b=>({hp:b.hp,alive:b.alive,px:b.px,py:b.py})),
+      chests:chests.map(c=>({opened:c.opened})),
+      map:map,                 // full tile grid (trees may be broken)
+      wispKills:wispKills,
+      relicsFound:relicsFound,
+      questClaimed:questClaimed,
+      marker:marker
+    };
+    localStorage.setItem(SAVE_KEY,JSON.stringify(data));
+  }catch(e){/* storage may be unavailable; ignore */}
+}
+function hasSave(){try{return !!localStorage.getItem(SAVE_KEY);}catch(e){return false;}}
+function clearSave(){try{localStorage.removeItem(SAVE_KEY);}catch(e){}}
+function loadGame(){
+  let data;
+  try{const raw=localStorage.getItem(SAVE_KEY);if(!raw)return false;data=JSON.parse(raw);}catch(e){return false;}
+  if(!data||data.v!==1||!data.map)return false;
+  try{
+    // world: rebuild structures, then overlay saved map (so broken trees persist)
+    genWorld();genChests();genMobs();relocateBosses();
+    // restore the saved tile grid (handles chopped trees / boss-smashed terrain)
+    if(Array.isArray(data.map)&&data.map.length===MAP_H&&data.map[0].length===MAP_W) map=data.map;
+    // player
+    Object.assign(player,{
+      x:data.player.x,y:data.player.y,hp:data.player.hp,maxhp:data.player.maxhp,
+      armor:data.player.armor,maxarmor:data.player.maxarmor,weaponKey:data.player.weaponKey,
+      equippedArmor:data.player.equippedArmor,gold:data.player.gold,arrows:data.player.arrows||0,
+      dir:data.player.dir||'down',boostTime:data.player.boostTime||0,boostMax:data.player.boostMax||0,
+      stam:100,maxstam:100,sprinting:false,swimming:false,attacking:0,attackCD:0,hurt:0,trail:[],lavaTick:0,cactusTick:0
+    });
+    // inventory: ensure a fixed 24-slot array
+    if(Array.isArray(data.player.inv)){const a=new Array(INV_SLOTS).fill(null);
+      for(let i=0;i<INV_SLOTS&&i<data.player.inv.length;i++)a[i]=data.player.inv[i]||null;player.inv=a;}
+    // bosses
+    if(Array.isArray(data.bosses))data.bosses.forEach((s,i)=>{if(bosses[i]){bosses[i].hp=s.hp;bosses[i].alive=s.alive;
+      bosses[i].px=s.px;bosses[i].py=s.py;bosses[i].hit=0;bosses[i].atk=0;bosses[i].lunge=0;
+      bosses[i].slowT=0;bosses[i].shockT=0;bosses[i].dotT=0;bosses[i]._dotAcc=0;bosses[i].atkTimer=0;}});
+    // chests
+    if(Array.isArray(data.chests))data.chests.forEach((s,i)=>{if(chests[i])chests[i].opened=s.opened;});
+    // quest progress
+    wispKills=data.wispKills||0;relicsFound=data.relicsFound||0;
+    for(const k in questClaimed)delete questClaimed[k];
+    if(data.questClaimed)for(const k in data.questClaimed)questClaimed[k]=data.questClaimed[k];
+    marker=data.marker||null;
+    arrows=[];chips=[];for(const k in treeHP)delete treeHP[k];
+    genQuests();
+    return true;
+  }catch(e){return false;}
+}
+
+// auto-save: periodically and when the tab closes/hides
+setInterval(saveGame,4000);
+window.addEventListener('beforeunload',saveGame);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)saveGame();});
+
+// ============================================================
 // Scale the whole game frame up to fill the window (keeps the crisp
 // 480x320 internal resolution; just displays it larger).
 const frameEl=document.getElementById('frame');
@@ -1418,7 +1488,16 @@ window.addEventListener('resize',fitToScreen);
 fitToScreen();
 
 function loop(now){const dt=Math.min(50,now-lastTime);lastTime=now;update(dt);draw();requestAnimationFrame(loop);}
-genWorld();genChests();genMobs();genQuests();relocateBosses();
+
+// ---- BOOT: resume a saved game if one exists, else generate a fresh world ----
+if(loadGame()){
+  // jump straight into the resumed game
+  document.getElementById('title').classList.add('hidden');
+  GAME='play';
+  // music starts on first key/click (browser autoplay rules)
+} else {
+  genWorld();genChests();genMobs();genQuests();relocateBosses();
+}
 requestAnimationFrame(loop);
 </script>
 </body>
