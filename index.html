@@ -85,6 +85,14 @@ const VIEW_W=cv.width, VIEW_H=cv.height;
 const TILE=24;
 const MAP_W=285, MAP_H=222;
 const METERS_PER_TILE=2;
+// ---- world tier: 1 = Emberlands, 2 = the Sunken Reaches (harder) ----
+let WORLD=1;
+let WORLD_SEED=0;            // shifts terrain generation per world
+// difficulty multipliers per world
+function bossHpMult(){return WORLD>=2?2.4:1;}
+function bossDmgMult(){return WORLD>=2?1.6:1;}
+function mobHpMult(){return WORLD>=2?2.2:1;}
+function mobDmgMult(){return WORLD>=2?1.8:1;}
 
 const C={
   void:'#0d0b14',grass:'#3f6047',grass2:'#365340',grassLite:'#56885c',grassDk:'#2a4632',
@@ -167,7 +175,9 @@ const FORGE={x:Math.floor(MAP_W/2)+3,y:Math.floor(MAP_H/2)-1}; // anvil tile (in
 function biomeAt(tx,ty){if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H)return'grass';return biomeMap[ty][tx];}
 
 function genWorld(){
-  const elev=makeNoise(1337,18),moist=makeNoise(7777,22),temp=makeNoise(4242,40),detail=rng(909);
+  // seed shifts per world so World 2 is a different layout
+  const s=WORLD_SEED;
+  const elev=makeNoise(1337+s,18),moist=makeNoise(7777+s,22),temp=makeNoise(4242+s,40),detail=rng(909+s);
   map=[];biomeMap=[];
   for(let y=0;y<MAP_H;y++){
     const mrow=[],brow=[];
@@ -262,7 +272,13 @@ const WEAPONS={
   tideblade:{name:'Tide Warden Sword',dmg:50,range:48,swing:16,color:'#3d8bbf',icon:'blade',shock:true,warden:true,value:93},
   wildblade:{name:'Wild Warden Sword',dmg:54,range:46,swing:19,color:'#3e8b46',icon:'blade',venom:true,warden:true,value:96},
   // ---- forged from all four Warden swords at the merging station ----
-  excalibur:{name:'Excalibur',dmg:100,range:52,swing:16,color:'#fff1a8',icon:'blade',burn:true,slow:true,shock:true,venom:true,legendary:true,value:300}
+  excalibur:{name:'Excalibur',dmg:100,range:52,swing:16,color:'#fff1a8',icon:'blade',burn:true,slow:true,shock:true,venom:true,legendary:true,value:300},
+  // ---- WORLD 2 weapons (the Sunken Reaches) — stronger, found in chests there ----
+  abysssaber:{name:'Abyss Saber',dmg:60,range:48,swing:15,color:'#2fd4c0',icon:'blade',slow:true,world2:true,value:130},
+  voidpike:{name:'Void Pike',dmg:66,range:66,swing:14,color:'#9b5fae',icon:'spear',shock:true,world2:true,value:140},
+  doomaxe:{name:'Doombringer Axe',dmg:78,range:44,swing:21,color:'#ff5a1f',icon:'axe',burn:true,world2:true,value:160},
+  stormbow:{name:'Storm Bow',dmg:48,range:0,swing:9,color:'#5fd0ff',icon:'bow',ranged:true,arrowSpd:8.5,shock:true,world2:true,value:150},
+  ruinblade:{name:'Ruin Cleaver',dmg:90,range:50,swing:17,color:'#ff2d6b',icon:'blade',burn:true,venom:true,world2:true,rare:true,value:220}
 };
 // the four swords required to forge Excalibur
 const EXCALIBUR_PARTS=['emberblade','frostblade','tideblade','wildblade'];
@@ -332,7 +348,78 @@ const bosses=[
   {name:'Warden of Ember',x:VOLCANO.x,y:VOLCANO.y+VOLCANO.r+5,color:'#7a2d1a',accent:'#ff7a3d',
     dropW:'emberblade',dropA:'emberplate',size:38,speed:1.3,reach:46}
 ];
-bosses.forEach(b=>{b.hp=2500;b.max=2500;b.dmg=30;b.alive=true;b.hit=0;b.atk=0;b.px=b.x*TILE;b.py=b.y*TILE;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b.atkTimer=0;});
+function setBossStats(){bosses.forEach(b=>{b.max=Math.round(2500*bossHpMult());b.hp=b.max;b.dmg=Math.round(30*bossDmgMult());
+  b.alive=true;b.hit=0;b.atk=0;b.px=b.x*TILE;b.py=b.y*TILE;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b.atkTimer=0;});}
+setBossStats();
+
+// ============================================================
+//  THE KRAKEN — final boss, fought in a sealed water arena
+//  unlocked when Excalibur is forged. 50,000 HP, no escape.
+// ============================================================
+// the arena is carved into a fixed region of the map as deep water ringed
+// by an unbreakable stone wall. Player is teleported to its centre.
+const ARENA={cx:Math.floor(MAP_W*0.5),cy:Math.floor(MAP_H*0.78),r:14}; // tile radius, south of centre (clear of shop)
+let inKrakenFight=false;
+const kraken={
+  active:false,hp:50000,max:50000,
+  px:0,py:0,size:96,hit:0,
+  tentacles:[],  // {ang, len, phase, hp, hit, atkTimer, striking}
+  atkTimer:0,bodyBob:0
+};
+function buildArena(){
+  // place the arena where the shop ISN'T — shift it to the far playable area.
+  // carve a circular water pool walled by border-type stone (tile 4 = mountain/solid).
+  const {cx,cy,r}=ARENA;
+  for(let y=cy-r-3;y<=cy+r+3;y++)for(let x=cx-r-3;x<=cx+r+3;x++){
+    if(x<2||y<2||x>=MAP_W-2||y>=MAP_H-2)continue;
+    const d=Math.hypot(x-cx,y-cy);
+    if(d<=r){map[y][x]=2;biomeMap[y][x]='arena';}          // deep water floor
+    else if(d<=r+2){map[y][x]=4;biomeMap[y][x]='arenawall';} // unbreakable wall ring
+  }
+}
+function startKrakenFight(){
+  buildArena();
+  inKrakenFight=true;
+  // teleport player to arena centre
+  player.x=ARENA.cx*TILE; player.y=ARENA.cy*TILE;
+  // place kraken at centre, slightly above player
+  kraken.active=true;kraken.hp=kraken.max;kraken.hit=0;kraken.atkTimer=0;
+  kraken.px=ARENA.cx*TILE; kraken.py=(ARENA.cy-3)*TILE;
+  // spawn 8 tentacles around the body
+  kraken.tentacles=[];
+  for(let i=0;i<8;i++){
+    kraken.tentacles.push({ang:(i/8)*Math.PI*2,baseLen:60+Math.random()*30,phase:Math.random()*6,
+      hp:1200,max:1200,hit:0,atkTimer:Math.random()*1600,striking:0});
+  }
+  // clear other bosses/mobs so the arena is just you vs kraken
+  mobs=[];arrows=[];
+  Audio2.bossDown();
+  toast('THE KRAKEN AWAKENS — there is no escape. Slay it.');
+}
+// arena walls are unbreakable even by the kraken; block player exit
+function arenaWall(tx,ty){return inKrakenFight && biomeMap[ty] && biomeMap[ty][tx]==='arenawall';}
+
+// ---- PORTAL to World 2 (appears when the Kraken dies) ----
+const portal={active:false,px:0,py:0,anim:0};
+function spawnPortal(){
+  portal.active=true;portal.anim=0;
+  // place it at arena centre where the kraken was
+  portal.px=ARENA.cx*TILE; portal.py=ARENA.cy*TILE;
+}
+function goToWorld2(){
+  portal.active=false;inKrakenFight=false;kraken.active=false;kraken.tentacles=[];
+  WORLD=2; WORLD_SEED=50000;   // new layout + difficulty
+  // regenerate the whole world at the harder tier
+  genWorld();genChests();genMobs();setBossStats();relocateBosses();
+  // player keeps gear/inventory/gold; just reposition to the new spawn
+  player.x=MAP_W*TILE/2; player.y=MAP_H*TILE/2+TILE*2;
+  player.hp=player.maxhp; // heal on entering the new world
+  arrows=[];chips=[];for(const k in treeHP)delete treeHP[k];
+  marker=null;
+  Audio2.win();
+  toast('THE SUNKEN REACHES — World 2. Stronger foes, greater treasures await.');
+  saveGame();
+}
 // After the world is generated, make sure no Warden is sitting on water/lava/solid.
 // Spiral outward from its intended tile to the nearest tile a boss can actually stand on.
 function relocateBosses(){
@@ -377,6 +464,16 @@ function genChests(){
 }
 function rollBiomeLoot(r,biome){
   const L=BIOME_LOOT[biome]||BIOME_LOOT.grass;const roll=r();
+  // WORLD 2: chests carry the stronger Sunken Reaches arsenal
+  if(WORLD>=2){
+    const w2=['abysssaber','voidpike','doomaxe','stormbow'];
+    if(roll<0.05)return{kind:'weapon',key:'ruinblade',relic:true};        // ~5% top-tier Ruin Cleaver
+    if(roll<0.30)return{kind:'weapon',key:w2[Math.floor(r()*w2.length)],relic:true}; // strong world-2 weapon
+    if(roll<0.45)return{kind:'armor',key:L.relicA,relic:true};            // relic armor more common
+    if(roll<0.58)return{kind:'armor',key:'warden'};
+    if(roll<0.80)return{kind:'potion',key:'heal',val:60};
+    return{kind:'gold',key:'gold',val:40+Math.floor(r()*80)};
+  }
   if(roll<0.04)return{kind:'weapon',key:L.relicW,relic:true};
   if(roll<0.07)return{kind:'armor',key:L.relicA,relic:true};
   if(roll<0.12)return{kind:'weapon',key:'longbow',relic:true};   // ~5% rare Shadowstring Bow (25 dmg)
@@ -392,12 +489,14 @@ function rollBiomeLoot(r,biome){
 // ============================================================
 let mobs=[];
 function genMobs(){
-  const r=rng(7);mobs=[];
-  for(let i=0;i<90;i++){
+  const r=rng(7+WORLD_SEED);mobs=[];
+  const hpM=mobHpMult(),dmgM=mobDmgMult(),count=WORLD>=2?120:90;
+  for(let i=0;i<count;i++){
     let tx,ty,tries=0;
     do{tx=2+Math.floor(r()*(MAP_W-4));ty=2+Math.floor(r()*(MAP_H-4));tries++;}while(enemyBlocked(tx,ty)&&tries<25);
     if(enemyBlocked(tx,ty))continue;
-    mobs.push({px:tx*TILE,py:ty*TILE,hp:30,max:30,dmg:8,speed:0.6+r()*0.5,hit:0,wob:r()*6,slowT:0,shockT:0,dotT:0});
+    const hp=Math.round(30*hpM);
+    mobs.push({px:tx*TILE,py:ty*TILE,hp:hp,max:hp,dmg:Math.round(8*dmgM),speed:(0.6+r()*0.5)*(WORLD>=2?1.2:1),hit:0,wob:r()*6,slowT:0,shockT:0,dotT:0});
   }
 }
 
@@ -497,6 +596,8 @@ function resetGame(){
   for(const k in treeHP)delete treeHP[k];chips=[];
   bosses.forEach(b=>{b.hp=b.max;b.alive=true;b.px=b.x*TILE;b.py=b.y*TILE;b.hit=0;b.atk=0;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b._dotAcc=0;b.atkTimer=0;});
   wispKills=0;relicsFound=0;for(const k in questClaimed)delete questClaimed[k];marker=null;shopOpen=false;forgeOpen=false;genQuests();
+  kraken.active=false;inKrakenFight=false;kraken.tentacles=[];
+  WORLD=1;WORLD_SEED=0;portal.active=false;setBossStats();
   GAME='play';Audio2.startMusic();
 }
 
@@ -578,6 +679,9 @@ function tryForgeExcalibur(){
   player.weaponKey='excalibur';
   Audio2.rare();Audio2.win();
   toast('★★ EXCALIBUR FORGED! 100 dmg with burn, slow, shock & venom ★★');
+  forgeOpen=false; // close the forge popup
+  // ---- unlock the final trial: teleport into the sealed Kraken arena ----
+  setTimeout(()=>startKrakenFight(),400);
 }
 let forgeBtns=[];
 function handleForgeClick(mx,my){
@@ -642,7 +746,21 @@ function doAttack(ang){
     const a=Math.atan2(my-cy,mx-cx);m.px+=Math.cos(a)*10;m.py+=Math.sin(a)*10;}});
   bosses.forEach(b=>{if(!b.alive)return;const bx=b.px+b.size/2,by=b.py+b.size/2;
     if(Math.hypot(bx-hx,by-hy)<hr+b.size/2){b.hp-=w.dmg;b.hit=8;landed=true;applyEffects(b,w);}});
+  if(hitKraken(hx,hy,hr,w))landed=true;
   if(landed)Audio2.hit();
+}
+// damage the kraken's body or any tentacle within the swing/projectile area
+function hitKraken(hx,hy,hr,w){
+  if(!kraken.active)return false;
+  let hit=false;
+  const kbx=kraken.px+kraken.size/2,kby=kraken.py+kraken.size/2;
+  // body (big target)
+  if(Math.hypot(kbx-hx,kby-hy)<hr+kraken.size*0.4){kraken.hp-=w.dmg;kraken.hit=6;applyEffects(kraken,w);hit=true;}
+  // tentacles
+  kraken.tentacles.forEach(t=>{if(t.hp<=0)return;
+    if(t._tipx!==undefined&&Math.hypot(t._tipx-hx,t._tipy-hy)<hr+10){
+      t.hp-=w.dmg;t.hit=6;kraken.hp-=Math.floor(w.dmg*0.5);kraken.hit=6;hit=true;} });
+  return hit;
 }
 function attackDir(){const m={up:-Math.PI/2,down:Math.PI/2,left:Math.PI,right:0};doAttack(m[player.dir]);}
 function attackToward(sx,sy){const px=player.x+player.w/2-cam.x,py=player.y+player.h/2-cam.y;doAttack(Math.atan2(sy-py,sx-px));}
@@ -650,7 +768,8 @@ function updateArrows(){
   arrows.forEach(a=>{a.x+=a.vx;a.y+=a.vy;a.life--;
     if(solid(Math.floor(a.x/TILE),Math.floor(a.y/TILE))){a.life=0;return;}
     mobs.forEach(m=>{if(m.hp<=0)return;const mx=m.px+12,my=m.py+12;if(Math.hypot(mx-a.x,my-a.y)<12){m.hp-=a.dmg;m.hit=8;if(a.w)applyEffects(m,a.w);a.life=0;Audio2.hit();}});
-    bosses.forEach(b=>{if(!b.alive)return;const bx=b.px+b.size/2,by=b.py+b.size/2;if(Math.hypot(bx-a.x,by-a.y)<b.size/2+6){b.hp-=a.dmg;b.hit=8;if(a.w)applyEffects(b,a.w);a.life=0;Audio2.hit();}});});
+    bosses.forEach(b=>{if(!b.alive)return;const bx=b.px+b.size/2,by=b.py+b.size/2;if(Math.hypot(bx-a.x,by-a.y)<b.size/2+6){b.hp-=a.dmg;b.hit=8;if(a.w)applyEffects(b,a.w);a.life=0;Audio2.hit();}});
+    if(a.life>0&&kraken.active&&a.w&&hitKraken(a.x,a.y,8,a.w)){a.life=0;Audio2.hit();}});
   arrows=arrows.filter(a=>a.life>0);
 }
 function interact(){
@@ -785,7 +904,15 @@ function update(dt){
     if(b.hit>0)b.hit--;
     if(b.hp<=0){b.alive=false;Audio2.bossDown();invAdd('weapon',b.dropW);invAdd('armor',b.dropA);
       toast(b.name+' falls!  Dropped '+WEAPONS[b.dropW].name+' + '+ARMORS[b.dropA].name+' — equip in bag (I)');
-      if(bosses.every(x=>!x.alive)){GAME='win';clearSave();document.getElementById('win').classList.remove('hidden');Audio2.win();}}});
+      if(bosses.every(x=>!x.alive))toast('All four Wardens freed! Forge the Warden Swords into Excalibur at the market.');}});
+  updateKraken(dt);
+  // portal: animate and detect the player stepping through
+  if(portal.active){
+    portal.anim+=dt;
+    const pcx=player.x+8,pcy=player.y+9;
+    const dx=pcx-(portal.px+TILE/2),dy=pcy-(portal.py+TILE/2);
+    if(Math.hypot(dx,dy)<20){goToWorld2();}
+  }
   checkQuests();
 }
 // decay status timers and apply damage-over-time
@@ -793,6 +920,42 @@ function tickEffects(t,dt){
   if(t.slowT>0)t.slowT-=dt;
   if(t.dotT>0){t.dotT-=dt;t._dotAcc=(t._dotAcc||0)+dt;
     if(t._dotAcc>=1000){t._dotAcc-=1000;t.hp-=(t.dotDmg||5);t.hit=Math.max(t.hit,4);}}
+}
+// ---- KRAKEN update: tentacles writhe and periodically strike the player ----
+function updateKraken(dt){
+  if(!kraken.active)return;
+  kraken.bodyBob+=dt*0.003;
+  if(kraken.hit>0)kraken.hit--;
+  const pcx=player.x+8,pcy=player.y+9;
+  const kbx=kraken.px+kraken.size/2,kby=kraken.py+kraken.size/2;
+  // damage-over-time effects applied to the kraken body
+  tickEffects(kraken,dt);
+  kraken.tentacles.forEach(t=>{
+    if(t.hp<=0)return;
+    t.phase+=dt*0.004;
+    if(t.hit>0)t.hit--;
+    if(t.striking>0)t.striking-=dt;
+    // tentacle tip position (reaches out from body toward its angle, undulating)
+    t.atkTimer+=dt;
+    // periodically lunge a tentacle toward the player
+    if(t.atkTimer>=1600){t.atkTimer=0;t.striking=350;
+      // aim this tentacle's angle at the player for the strike
+      t.ang=Math.atan2(pcy-kby,pcx-kbx)+(Math.random()-0.5)*0.6;
+    }
+    // compute tip and check hit on player during a strike
+    const reach=t.baseLen+(t.striking>0?70:0)+Math.sin(t.phase)*10;
+    const tipx=kbx+Math.cos(t.ang)*reach, tipy=kby+Math.sin(t.ang)*reach;
+    if(t.striking>0&&Math.hypot(pcx-tipx,pcy-tipy)<22){damagePlayer(22);}
+    t._tipx=tipx;t._tipy=tipy;t._reach=reach;
+  });
+  // if all tentacles dead, body becomes vulnerable faster (just flavour) — body always takes damage anyway
+  if(kraken.hp<=0){
+    kraken.active=false;
+    // open a portal to World 2 (player stays sealed in the arena until they enter it)
+    spawnPortal();
+    Audio2.bossDown();
+    toast('The Kraken is slain! A shimmering portal tears open — step through to the next world.');
+  }
 }
 function tryMove(p,mx,my){const nx=p.x+mx,ny=p.y+my,bx=nx+3,by=ny+8,bw=p.w-6,bh=p.h-8;
   const pts=[[bx,by],[bx+bw,by],[bx,by+bh],[bx+bw,by+bh]];
@@ -823,6 +986,8 @@ function draw(){
   const actors=[];
   mobs.forEach(m=>{const sx=m.px-cam.x,sy=m.py-cam.y;if(sx>-30&&sy>-30&&sx<VIEW_W+30&&sy<VIEW_H+30)actors.push({y:m.py,draw:()=>drawMob(m)});});
   bosses.forEach(b=>{if(b.alive)actors.push({y:b.py,draw:()=>drawBoss(b)});});
+  if(kraken.active){drawKrakenTentacles();actors.push({y:kraken.py+kraken.size,draw:drawKraken});}
+  if(portal.active)actors.push({y:portal.py+TILE,draw:drawPortal});
   actors.push({y:player.y,draw:drawPlayer});
   actors.sort((a,b)=>a.y-b.y);actors.forEach(a=>a.draw());
   drawOffscreenBossArrows();
@@ -1106,6 +1271,92 @@ function drawBoss(b){const x=Math.floor(b.px-cam.x),y=Math.floor(b.py-cam.y),s=b
   ctx.fillStyle=C.bone;ctx.font='6px "Press Start 2P"';ctx.fillText(b.name.toUpperCase(),x-14,y-15);
   ctx.fillStyle='#9b94a8';ctx.font='5px "Press Start 2P"';ctx.fillText(Math.max(0,Math.ceil(b.hp))+'/'+b.max,x-2,y-4);}
 
+// ---- KRAKEN rendering ----
+function drawKrakenTentacles(){
+  const kbx=kraken.px+kraken.size/2-cam.x, kby=kraken.py+kraken.size/2-cam.y;
+  kraken.tentacles.forEach(t=>{
+    if(t.hp<=0)return;
+    const reach=t._reach||t.baseLen;
+    const striking=t.striking>0;
+    const flash=t.hit>0;
+    // draw as a series of tapering segments curving toward the tip
+    const segs=8;
+    for(let i=segs;i>=1;i--){
+      const f=i/segs;
+      const wob=Math.sin(t.phase+f*3)*12*(1-f*0.3);
+      const perpx=Math.cos(t.ang+Math.PI/2),perpy=Math.sin(t.ang+Math.PI/2);
+      const dist=reach*f;
+      const sx=kbx+Math.cos(t.ang)*dist+perpx*wob;
+      const sy=kby+Math.sin(t.ang)*dist+perpy*wob;
+      const r=Math.max(2,9*(1-f*0.8));
+      ctx.fillStyle=flash?'#fff':(striking?'#b5477a':'#5a2d6b');
+      ctx.beginPath();ctx.arc(sx,sy,r,0,7);ctx.fill();
+      if(i%2===0){ctx.fillStyle=flash?'#fff':'#7a3d8c';ctx.beginPath();ctx.arc(sx,sy,Math.max(1,r-2),0,7);ctx.fill();}
+    }
+    // suckers near tip
+    const tx=t._tipx-cam.x,ty=t._tipy-cam.y;
+    ctx.fillStyle=striking?'#ff7ab0':'#9b5fae';ctx.beginPath();ctx.arc(tx,ty,4,0,7);ctx.fill();
+    if(t.hp<t.max){bar(tx-8,ty-10,16,2,t.hp/t.max,'#b5477a');}
+  });
+}
+function drawKraken(){
+  const x=Math.floor(kraken.px-cam.x),y=Math.floor(kraken.py-cam.y),s=kraken.size;
+  const bob=Math.sin(kraken.bodyBob)*4;
+  const flash=kraken.hit>0?'#fff':null;
+  // murky shadow in water
+  ctx.fillStyle='rgba(0,0,0,.3)';ctx.beginPath();ctx.ellipse(x+s/2,y+s-6,s*0.5,s*0.2,0,0,7);ctx.fill();
+  // bulbous head
+  ctx.fillStyle=flash||'#3a1d47';ctx.beginPath();ctx.arc(x+s/2,y+s/2+bob,s*0.45,0,7);ctx.fill();
+  ctx.fillStyle=flash||'#4d2a5e';ctx.beginPath();ctx.arc(x+s/2,y+s/2-6+bob,s*0.38,0,7);ctx.fill();
+  ctx.fillStyle=flash||'#5e3570';ctx.beginPath();ctx.arc(x+s/2,y+s/2-12+bob,s*0.26,0,7);ctx.fill();
+  // mantle highlights
+  ctx.fillStyle='rgba(255,255,255,.12)';ctx.beginPath();ctx.arc(x+s/2-8,y+s/2-14+bob,6,0,7);ctx.fill();
+  // glowing eyes
+  const eg=Math.floor(Date.now()/250)%2;
+  ctx.fillStyle=flash?'#000':(eg?'#ffd23d':'#ff9d2d');
+  ctx.beginPath();ctx.arc(x+s/2-12,y+s/2+bob,7,0,7);ctx.fill();
+  ctx.beginPath();ctx.arc(x+s/2+12,y+s/2+bob,7,0,7);ctx.fill();
+  ctx.fillStyle=flash?'#fff':'#000';
+  ctx.beginPath();ctx.arc(x+s/2-12,y+s/2+bob,3,0,7);ctx.fill();
+  ctx.beginPath();ctx.arc(x+s/2+12,y+s/2+bob,3,0,7);ctx.fill();
+  // beak/maw
+  ctx.fillStyle=flash||'#1c0f24';ctx.beginPath();ctx.moveTo(x+s/2-6,y+s/2+12+bob);ctx.lineTo(x+s/2+6,y+s/2+12+bob);ctx.lineTo(x+s/2,y+s/2+20+bob);ctx.fill();
+  // big HP bar — centred at top of screen for the boss fight
+  const bw=240,bx=(VIEW_W-bw)/2,by=10;
+  ctx.fillStyle='rgba(0,0,0,.7)';ctx.fillRect(bx-4,by-4,bw+8,18);
+  bar(bx,by,bw,8,Math.max(0,kraken.hp)/kraken.max,'#b5477a');
+  ctx.fillStyle=C.bone;ctx.font='7px "Press Start 2P"';ctx.fillText('THE KRAKEN',bx+bw/2-38,by-6);
+  ctx.fillStyle='#e8d4ef';ctx.font='6px "Press Start 2P"';
+  ctx.fillText(Math.max(0,Math.ceil(kraken.hp)).toLocaleString()+' / '+kraken.max.toLocaleString(),bx+bw/2-44,by+7);
+}
+
+// swirling portal to World 2
+function drawPortal(){
+  const cx=portal.px+TILE/2-cam.x, cy=portal.py+TILE/2-cam.y;
+  const t=portal.anim/1000;
+  // glow base
+  for(let i=5;i>=1;i--){
+    const rad=10+i*5+Math.sin(t*3)*2;
+    ctx.fillStyle='rgba('+(120+i*20)+',60,'+(180+i*10)+','+(0.12*i/5+0.05)+')';
+    ctx.beginPath();ctx.arc(cx,cy,rad,0,7);ctx.fill();
+  }
+  // swirling ring of particles
+  for(let i=0;i<12;i++){
+    const a=t*2+i*(Math.PI*2/12);
+    const rr=18+Math.sin(t*4+i)*4;
+    const px=cx+Math.cos(a)*rr, py=cy+Math.sin(a)*rr*0.8;
+    ctx.fillStyle=i%2?'#c77fff':'#7fd0ff';
+    ctx.fillRect(px-1,py-1,3,3);
+  }
+  // bright core
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(cx,cy,5+Math.sin(t*5)*1.5,0,7);ctx.fill();
+  ctx.fillStyle='#e0c8ff';ctx.beginPath();ctx.arc(cx,cy,9,0,7);ctx.fill();
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(cx,cy,4,0,7);ctx.fill();
+  // label
+  ctx.fillStyle=C.gold;ctx.font='6px "Press Start 2P"';ctx.fillText('ENTER WORLD 2',cx-38,cy-26);
+  ctx.fillStyle='#9b94a8';ctx.fillText('walk in',cx-18,cy+34);
+}
+
 function bar(x,y,w,h,pct,col){ctx.fillStyle='#000';ctx.fillRect(x-1,y-1,w+2,h+2);
   ctx.fillStyle=C.stoneDk;ctx.fillRect(x,y,w,h);ctx.fillStyle=col;ctx.fillRect(x,y,Math.max(0,w*pct),h);
   ctx.fillStyle='rgba(255,255,255,.25)';ctx.fillRect(x,y,Math.max(0,w*pct),1);}
@@ -1130,6 +1381,7 @@ function drawHUD(){
   ctx.fillText('weapon: '+wn.name+(wn.ranged?'  ['+player.arrows+' arrows]':''),10,VIEW_H-12);
   ctx.fillStyle=C.gold;ctx.fillText('GOLD '+player.gold,10,VIEW_H-2);
   const freed=bosses.filter(b=>!b.alive).length;ctx.fillStyle=C.gold;ctx.fillText('WARDENS '+freed+'/4',VIEW_W-110,VIEW_H-2);
+  if(WORLD>=2){ctx.fillStyle='#c77fff';ctx.font='6px "Press Start 2P"';ctx.fillText('WORLD 2 · SUNKEN REACHES',VIEW_W-150,VIEW_H-22);}
   ctx.fillStyle='#9b94a8';ctx.font='6px "Press Start 2P"';ctx.fillText('O map  Q quests  I bag  R pin',VIEW_W-178,VIEW_H-12);
 }
 
@@ -1424,7 +1676,12 @@ function saveGame(){
       wispKills:wispKills,
       relicsFound:relicsFound,
       questClaimed:questClaimed,
-      marker:marker
+      marker:marker,
+      inKrakenFight:inKrakenFight,
+      world:WORLD,worldSeed:WORLD_SEED,
+      portal:portal.active?{px:portal.px,py:portal.py}:null,
+      kraken:kraken.active?{hp:kraken.hp,px:kraken.px,py:kraken.py,
+        tentacles:kraken.tentacles.map(t=>({hp:t.hp,ang:t.ang,baseLen:t.baseLen,phase:t.phase,atkTimer:t.atkTimer}))}:null
     };
     localStorage.setItem(SAVE_KEY,JSON.stringify(data));
   }catch(e){/* storage may be unavailable; ignore */}
@@ -1436,8 +1693,10 @@ function loadGame(){
   try{const raw=localStorage.getItem(SAVE_KEY);if(!raw)return false;data=JSON.parse(raw);}catch(e){return false;}
   if(!data||data.v!==1||!data.map)return false;
   try{
+    // restore world tier FIRST so terrain + difficulty regenerate correctly
+    WORLD=data.world||1; WORLD_SEED=data.worldSeed||0;
     // world: rebuild structures, then overlay saved map (so broken trees persist)
-    genWorld();genChests();genMobs();relocateBosses();
+    genWorld();genChests();genMobs();setBossStats();relocateBosses();
     // restore the saved tile grid (handles chopped trees / boss-smashed terrain)
     if(Array.isArray(data.map)&&data.map.length===MAP_H&&data.map[0].length===MAP_W) map=data.map;
     // player
@@ -1463,6 +1722,20 @@ function loadGame(){
     if(data.questClaimed)for(const k in data.questClaimed)questClaimed[k]=data.questClaimed[k];
     marker=data.marker||null;
     arrows=[];chips=[];for(const k in treeHP)delete treeHP[k];
+    // restore Kraken fight if it was active
+    inKrakenFight=!!data.inKrakenFight;
+    if(data.kraken&&inKrakenFight){
+      kraken.active=true;kraken.hp=data.kraken.hp;kraken.max=50000;kraken.hit=0;kraken.atkTimer=0;kraken.bodyBob=0;
+      kraken.px=data.kraken.px;kraken.py=data.kraken.py;
+      kraken.tentacles=(data.kraken.tentacles||[]).map(t=>({ang:t.ang,baseLen:t.baseLen,phase:t.phase||0,
+        hp:t.hp,max:1200,hit:0,atkTimer:t.atkTimer||0,striking:0}));
+      // make sure the arena geometry exists in the (restored) map
+      // (saved map already contains it, but rebuild walls just in case)
+      mobs=[];
+    } else {kraken.active=false;}
+    // restore portal if it was open
+    if(data.portal){portal.active=true;portal.px=data.portal.px;portal.py=data.portal.py;portal.anim=0;}
+    else portal.active=false;
     genQuests();
     return true;
   }catch(e){return false;}
