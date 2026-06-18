@@ -392,7 +392,7 @@ function startKrakenFight(){
       hp:1200,max:1200,hit:0,atkTimer:Math.random()*1600,striking:0});
   }
   // clear other bosses/mobs so the arena is just you vs kraken
-  mobs=[];arrows=[];
+  mobs=[];arrows=[];groundDrops=[];
   Audio2.bossDown();
   toast('THE KRAKEN AWAKENS — there is no escape. Slay it.');
 }
@@ -401,6 +401,28 @@ function arenaWall(tx,ty){return inKrakenFight && biomeMap[ty] && biomeMap[ty][t
 
 // ---- PORTAL to World 2 (appears when the Kraken dies) ----
 const portal={active:false,px:0,py:0,anim:0};
+
+// ---- GROUND DROPS: loot that bosses leave on the floor, picked up by walking over ----
+let groundDrops=[]; // {x,y, kind:'weapon'|'armor', key, bob}
+function dropLoot(px,py,kind,key){
+  // scatter slightly so multiple drops don't perfectly overlap
+  groundDrops.push({x:px+(Math.random()-0.5)*20,y:py+(Math.random()-0.5)*20,kind,key,bob:Math.random()*6,life:0});
+}
+function updateGroundDrops(dt){
+  const pcx=player.x+8,pcy=player.y+9;
+  for(let i=groundDrops.length-1;i>=0;i--){
+    const d=groundDrops[i];d.bob+=dt*0.004;d.life+=dt;
+    if(Math.hypot(pcx-d.x,pcy-d.y)<20){
+      const res=invAdd(d.kind,d.key);
+      if(res==='ok'){
+        groundDrops.splice(i,1);Audio2.pickup();
+        const nm=d.kind==='weapon'?WEAPONS[d.key].name:ARMORS[d.key].name;
+        toast('Picked up '+nm+' — equip it in your bag (I)');
+      }
+      // if bag is full, the item stays on the ground until you make space
+    }
+  }
+}
 function spawnPortal(){
   portal.active=true;portal.anim=0;
   // place it at arena centre where the kraken was
@@ -414,7 +436,7 @@ function goToWorld2(){
   // player keeps gear/inventory/gold; just reposition to the new spawn
   player.x=MAP_W*TILE/2; player.y=MAP_H*TILE/2+TILE*2;
   player.hp=player.maxhp; // heal on entering the new world
-  arrows=[];chips=[];for(const k in treeHP)delete treeHP[k];
+  arrows=[];chips=[];groundDrops=[];for(const k in treeHP)delete treeHP[k];
   marker=null;
   Audio2.win();
   toast('THE SUNKEN REACHES — World 2. Stronger foes, greater treasures await.');
@@ -596,7 +618,7 @@ function resetGame(){
   for(const k in treeHP)delete treeHP[k];chips=[];
   bosses.forEach(b=>{b.hp=b.max;b.alive=true;b.px=b.x*TILE;b.py=b.y*TILE;b.hit=0;b.atk=0;b.lunge=0;b.slowT=0;b.shockT=0;b.dotT=0;b._dotAcc=0;b.atkTimer=0;});
   wispKills=0;relicsFound=0;for(const k in questClaimed)delete questClaimed[k];marker=null;shopOpen=false;forgeOpen=false;genQuests();
-  kraken.active=false;inKrakenFight=false;kraken.tentacles=[];
+  kraken.active=false;inKrakenFight=false;kraken.tentacles=[];groundDrops=[];
   WORLD=1;WORLD_SEED=0;portal.active=false;setBossStats();
   GAME='play';Audio2.startMusic();
 }
@@ -902,9 +924,13 @@ function update(dt){
       if(dist<b.size/2+b.reach)damagePlayer(b.dmg);
     }
     if(b.hit>0)b.hit--;
-    if(b.hp<=0){b.alive=false;Audio2.bossDown();invAdd('weapon',b.dropW);invAdd('armor',b.dropA);
-      toast(b.name+' falls!  Dropped '+WEAPONS[b.dropW].name+' + '+ARMORS[b.dropA].name+' — equip in bag (I)');
-      if(bosses.every(x=>!x.alive))toast('All four Wardens freed! Forge the Warden Swords into Excalibur at the market.');}});
+    if(b.hp<=0){b.alive=false;Audio2.bossDown();
+      // drop the Warden sword + armor on the ground (guaranteed — never lost to a full bag)
+      dropLoot(b.px+b.size/2,b.py+b.size/2,'weapon',b.dropW);
+      dropLoot(b.px+b.size/2,b.py+b.size/2,'armor',b.dropA);
+      toast(b.name+' falls!  It dropped '+WEAPONS[b.dropW].name+' — walk over it to collect.');
+      if(bosses.every(x=>!x.alive))toast('All four Wardens freed! Collect the swords, then forge Excalibur at the market.');}});
+  updateGroundDrops(dt);
   updateKraken(dt);
   // portal: animate and detect the player stepping through
   if(portal.active){
@@ -983,6 +1009,19 @@ function draw(){
     ctx.fillStyle=(a.w&&a.w.burn)?C.ember:C.arrow;ctx.fillRect(-6,-1,10,2);ctx.fillStyle=C.bone;ctx.fillRect(3,-1,3,2);ctx.restore();});
   // wood chips from chopping trees
   chips.forEach(p=>{ctx.fillStyle=(p.life>14?'#8a5a30':'#6b4423');ctx.fillRect(Math.floor(p.x-cam.x),Math.floor(p.y-cam.y),2,2);});
+  // ground drops (boss loot lying on the floor)
+  groundDrops.forEach(d=>{
+    const x=d.x-cam.x,y=d.y-cam.y;if(x<-20||y<-20||x>VIEW_W+20||y>VIEW_H+20)return;
+    const bob=Math.sin(d.bob)*3;
+    // glow ring
+    ctx.fillStyle='rgba(233,196,106,.25)';ctx.beginPath();ctx.arc(x,y+6,11,0,7);ctx.fill();
+    // shadow
+    ctx.fillStyle='rgba(0,0,0,.3)';ctx.beginPath();ctx.ellipse(x,y+8,7,3,0,0,7);ctx.fill();
+    // floating icon
+    drawItemIcon(d,x-8,y-8+bob,16);
+    // sparkle
+    if(Math.floor(Date.now()/250)%2){ctx.fillStyle='#fff';ctx.fillRect(x+6,y-8+bob,2,2);}
+  });
   const actors=[];
   mobs.forEach(m=>{const sx=m.px-cam.x,sy=m.py-cam.y;if(sx>-30&&sy>-30&&sx<VIEW_W+30&&sy<VIEW_H+30)actors.push({y:m.py,draw:()=>drawMob(m)});});
   bosses.forEach(b=>{if(b.alive)actors.push({y:b.py,draw:()=>drawBoss(b)});});
@@ -1677,6 +1716,7 @@ function saveGame(){
       relicsFound:relicsFound,
       questClaimed:questClaimed,
       marker:marker,
+      groundDrops:groundDrops.map(d=>({x:d.x,y:d.y,kind:d.kind,key:d.key})),
       inKrakenFight:inKrakenFight,
       world:WORLD,worldSeed:WORLD_SEED,
       portal:portal.active?{px:portal.px,py:portal.py}:null,
@@ -1722,6 +1762,7 @@ function loadGame(){
     if(data.questClaimed)for(const k in data.questClaimed)questClaimed[k]=data.questClaimed[k];
     marker=data.marker||null;
     arrows=[];chips=[];for(const k in treeHP)delete treeHP[k];
+    groundDrops=Array.isArray(data.groundDrops)?data.groundDrops.map(d=>({x:d.x,y:d.y,kind:d.kind,key:d.key,bob:Math.random()*6,life:0})):[];
     // restore Kraken fight if it was active
     inKrakenFight=!!data.inKrakenFight;
     if(data.kraken&&inKrakenFight){
