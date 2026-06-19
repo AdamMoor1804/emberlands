@@ -361,7 +361,7 @@ setBossStats();
 const ARENA={cx:Math.floor(MAP_W*0.5),cy:Math.floor(MAP_H*0.78),r:14}; // tile radius, south of centre (clear of shop)
 let inKrakenFight=false;
 const kraken={
-  active:false,hp:50000,max:50000,
+  active:false,hp:30000,max:30000,
   px:0,py:0,size:96,hit:0,
   tentacles:[],  // {ang, len, phase, hp, hit, atkTimer, striking}
   atkTimer:0,bodyBob:0
@@ -383,7 +383,7 @@ function startKrakenFight(){
   // teleport player to arena centre
   player.x=ARENA.cx*TILE; player.y=ARENA.cy*TILE;
   // place kraken at centre, slightly above player
-  kraken.active=true;kraken.hp=kraken.max;kraken.hit=0;kraken.atkTimer=0;
+  kraken.active=true;kraken.hp=kraken.max;kraken.hit=0;kraken.atkTimer=0;kraken.strike=0;
   kraken.px=ARENA.cx*TILE; kraken.py=(ARENA.cy-3)*TILE;
   // spawn 8 tentacles around the body
   kraken.tentacles=[];
@@ -954,34 +954,66 @@ function updateKraken(dt){
   if(kraken.hit>0)kraken.hit--;
   const pcx=player.x+8,pcy=player.y+9;
   const kbx=kraken.px+kraken.size/2,kby=kraken.py+kraken.size/2;
-  // damage-over-time effects applied to the kraken body
   tickEffects(kraken,dt);
+
+  const aliveTentacles=kraken.tentacles.filter(t=>t.hp>0).length;
+
   kraken.tentacles.forEach(t=>{
     if(t.hp<=0)return;
     t.phase+=dt*0.004;
     if(t.hit>0)t.hit--;
     if(t.striking>0)t.striking-=dt;
-    // tentacle tip position (reaches out from body toward its angle, undulating)
     t.atkTimer+=dt;
-    // periodically lunge a tentacle toward the player
-    if(t.atkTimer>=1600){t.atkTimer=0;t.striking=350;
-      // aim this tentacle's angle at the player for the strike
-      t.ang=Math.atan2(pcy-kby,pcx-kbx)+(Math.random()-0.5)*0.6;
+    // periodically lunge this tentacle at the player
+    if(t.atkTimer>=1400){t.atkTimer=0;t.striking=420;
+      t.ang=Math.atan2(pcy-kby,pcx-kbx)+(Math.random()-0.5)*0.5; // aim at player
     }
-    // compute tip and check hit on player during a strike
-    const reach=t.baseLen+(t.striking>0?70:0)+Math.sin(t.phase)*10;
+    const reach=t.baseLen+(t.striking>0?80:0)+Math.sin(t.phase)*10;
     const tipx=kbx+Math.cos(t.ang)*reach, tipy=kby+Math.sin(t.ang)*reach;
-    if(t.striking>0&&Math.hypot(pcx-tipx,pcy-tipy)<22){damagePlayer(22);}
     t._tipx=tipx;t._tipy=tipy;t._reach=reach;
+    // STRIKE HIT: during a strike, hit the player if they're anywhere near the
+    // tentacle's line (not just the very tip) — check distance from player to the
+    // segment between the body and the tip.
+    if(t.striking>0){
+      const d=distToSegment(pcx,pcy,kbx,kby,tipx,tipy);
+      if(d<26){damagePlayer(20);}
+    }
   });
-  // if all tentacles dead, body becomes vulnerable faster (just flavour) — body always takes damage anyway
+
+  // ---- BODY ATTACKS on its own timer, so the Kraken keeps fighting even with
+  // every tentacle destroyed (and the fight never goes passive) ----
+  kraken.atkTimer+=dt;
+  // attacks speed up as tentacles die (enrage)
+  const bodyInterval=aliveTentacles>0?1200:700;
+  if(kraken.atkTimer>=bodyInterval){
+    kraken.atkTimer=0;
+    const distToPlayer=Math.hypot(pcx-kbx,pcy-kby);
+    // slam: damages the player if they're near the body, plus a lunge toward them
+    if(distToPlayer<140){damagePlayer(aliveTentacles>0?18:28);}
+    // the kraken drifts toward the player so it can always reach them
+    kraken.strike=300;
+  }
+  // body slowly chases the player within the arena so you can't just out-range it
+  if(kraken.strike>0)kraken.strike-=dt;
+  const chaseSpd=(kraken.strike>0?0.9:0.4);
+  const ang=Math.atan2(pcy-kby,pcx-kbx);
+  const nx=kraken.px+Math.cos(ang)*chaseSpd, ny=kraken.py+Math.sin(ang)*chaseSpd;
+  // keep the kraken inside the arena water (don't let it leave through walls)
+  const ntx=Math.floor((nx+kraken.size/2)/TILE), nty=Math.floor((ny+kraken.size/2)/TILE);
+  if(!solid(ntx,nty)){kraken.px=nx;kraken.py=ny;}
+
   if(kraken.hp<=0){
     kraken.active=false;
-    // open a portal to World 2 (player stays sealed in the arena until they enter it)
     spawnPortal();
     Audio2.bossDown();
     toast('The Kraken is slain! A shimmering portal tears open — step through to the next world.');
   }
+}
+// shortest distance from point (px,py) to line segment (ax,ay)-(bx,by)
+function distToSegment(px,py,ax,ay,bx,by){
+  const dx=bx-ax,dy=by-ay;const len2=dx*dx+dy*dy;
+  let t=len2>0?((px-ax)*dx+(py-ay)*dy)/len2:0;t=Math.max(0,Math.min(1,t));
+  const cx=ax+t*dx,cy=ay+t*dy;return Math.hypot(px-cx,py-cy);
 }
 function tryMove(p,mx,my){const nx=p.x+mx,ny=p.y+my,bx=nx+3,by=ny+8,bw=p.w-6,bh=p.h-8;
   const pts=[[bx,by],[bx+bw,by],[bx,by+bh],[bx+bw,by+bh]];
@@ -1766,7 +1798,7 @@ function loadGame(){
     // restore Kraken fight if it was active
     inKrakenFight=!!data.inKrakenFight;
     if(data.kraken&&inKrakenFight){
-      kraken.active=true;kraken.hp=data.kraken.hp;kraken.max=50000;kraken.hit=0;kraken.atkTimer=0;kraken.bodyBob=0;
+      kraken.active=true;kraken.hp=data.kraken.hp;kraken.max=30000;kraken.hit=0;kraken.atkTimer=0;kraken.strike=0;kraken.bodyBob=0;
       kraken.px=data.kraken.px;kraken.py=data.kraken.py;
       kraken.tentacles=(data.kraken.tentacles||[]).map(t=>({ang:t.ang,baseLen:t.baseLen,phase:t.phase||0,
         hp:t.hp,max:1200,hit:0,atkTimer:t.atkTimer||0,striking:0}));
